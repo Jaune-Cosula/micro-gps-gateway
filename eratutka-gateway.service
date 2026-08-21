@@ -1,0 +1,22 @@
+[Unit]
+Description=Erätutka Micro GPS Gateway (SinoTrack ST-904L & ICAR IK122T)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/eratutka-gateway
+EnvironmentFile=/opt/eratutka-gateway/.env
+ExecStart=/usr/bin/npx tsx /opt/eratutka-gateway/standalone-gateway.ts
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eratutka-gps
+
+# Äärimmäisen kevyt muistinrajoitus e2-micro virtuaalikoneelle
+MemoryMax=60M
+MemoryHigh=50M
+
+[Install]
+WantedBy=multi-user.target
