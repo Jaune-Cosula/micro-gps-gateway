@@ -121,14 +121,30 @@ const CRC_TABLE = [
   0x6306, 0x728f, 0x4014, 0x519d, 0x2522, 0x34ab, 0x0630, 0x17b9,
   0xef4e, 0xfec7, 0xcc5c, 0xddd5, 0xa96a, 0xb8e3, 0x8a78, 0x9bf1,
   0x7387, 0x620e, 0x5095, 0x411c, 0x35a3, 0x242a, 0x16b1, 0x0738,
-  0xffcf, 0xee46, 0xdcdd, 0xcd54, 0xb9eb, 0xa862, 0x9af9, 0x8b70
+  0xffcf, 0xee46, 0xdcdd, 0xcd54, 0xb9eb, 0xa862, 0x9af9, 0x8b70,
+  0x8408, 0x9581, 0xa71a, 0xb693, 0xc22c, 0xd3a5, 0xe13e, 0xf0b7,
+  0x0840, 0x19c9, 0x2b52, 0x3adb, 0x4e64, 0x5fed, 0x6d76, 0x7cf7,
+  0x9489, 0x8500, 0xb79b, 0xa612, 0xd2ad, 0xc324, 0xf1bf, 0xe036,
+  0x18c1, 0x0948, 0x3bd3, 0x2a5a, 0x5ee5, 0x4f6c, 0x7df7, 0x6c7e,
+  0xa50a, 0xb483, 0x8618, 0x9791, 0xe32e, 0xf2a7, 0xc03c, 0xd1b5,
+  0x2942, 0x38cb, 0x0a50, 0x1bd9, 0x6f66, 0x7eef, 0x4c74, 0x5dfd,
+  0xb58b, 0xa402, 0x9699, 0x8710, 0xf3af, 0xe226, 0xd0bd, 0xc134,
+  0x39c3, 0x284a, 0x1ad1, 0x0b58, 0x7fe7, 0x6e6e, 0x5cf5, 0x4d7c,
+  0xc60c, 0xd785, 0xe51e, 0xf497, 0x8028, 0x91a1, 0xa33a, 0xb2b3,
+  0x4a44, 0x5bcd, 0x6956, 0x78df, 0x0c60, 0x1de9, 0x2f72, 0x3efb,
+  0xd68d, 0xc704, 0xf59f, 0xe416, 0x90a9, 0x8120, 0xb3bb, 0xa232,
+  0x5ac5, 0x4b4c, 0x79d7, 0x685e, 0x1ce1, 0x0d68, 0x3ff3, 0x2e7a,
+  0xe70e, 0xf687, 0xc41c, 0xd595, 0xa12a, 0xb0a3, 0x8238, 0x93b1,
+  0x6b46, 0x7acf, 0x4854, 0x59dd, 0x2d62, 0x3ceb, 0x0e70, 0x1ff9,
+  0xf78f, 0xe606, 0xd49d, 0xc514, 0xb1ab, 0xa022, 0x92b9, 0x8330,
+  0x7bc7, 0x6a4e, 0x58d5, 0x495c, 0x3de3, 0x2c6a, 0x1ef1, 0x0f78
 ];
 
 function getCrc16(buffer: Buffer, start = 0, len = buffer.length - start): number {
   let crc = 0xffff;
   for (let i = start; i < start + len; i++) {
     const byte = buffer[i];
-    crc = (crc >> 8) ^ (CRC_TABLE[(crc ^ byte) & 0x0f] || 0);
+    crc = (crc >> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff];
   }
   return (~crc) & 0xffff;
 }
@@ -269,8 +285,181 @@ function handleSinoTrack(raw: string) {
   }
 }
 
+function unescapeJt808(buf: Buffer): Buffer {
+  const result: number[] = [];
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x7d && i + 1 < buf.length) {
+      if (buf[i + 1] === 0x02) {
+        result.push(0x7e);
+        i++;
+        continue;
+      } else if (buf[i + 1] === 0x01) {
+        result.push(0x7d);
+        i++;
+        continue;
+      }
+    }
+    result.push(buf[i]);
+  }
+  return Buffer.from(result);
+}
+
+function escapeJt808(body: Buffer): Buffer {
+  const result: number[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const b = body[i];
+    if (b === 0x7e) {
+      result.push(0x7d, 0x02);
+    } else if (b === 0x7d) {
+      result.push(0x7d, 0x01);
+    } else {
+      result.push(b);
+    }
+  }
+  return Buffer.from(result);
+}
+
+function buildJt808Response(
+  respMsgId: number,
+  phoneBcd: Buffer,
+  clientSerial: number,
+  originalMsgId = 0,
+  result = 0,
+  authToken = 'AUTH_OK'
+): Buffer {
+  let body: Buffer;
+  if (respMsgId === 0x8100) {
+    const tokenBuf = Buffer.from(authToken, 'ascii');
+    body = Buffer.alloc(3 + tokenBuf.length);
+    body.writeUInt16BE(clientSerial, 0);
+    body[2] = result; // 0 = Success
+    tokenBuf.copy(body, 3);
+  } else {
+    // 0x8001 General Response
+    body = Buffer.alloc(5);
+    body.writeUInt16BE(clientSerial, 0);
+    body.writeUInt16BE(originalMsgId, 2);
+    body[4] = result;
+  }
+
+  const header = Buffer.alloc(12);
+  header.writeUInt16BE(respMsgId, 0);
+  header.writeUInt16BE(body.length, 2);
+  phoneBcd.copy(header, 4, 0, Math.min(6, phoneBcd.length));
+  header.writeUInt16BE(1, 10);
+
+  const unescapedPayload = Buffer.concat([header, body]);
+  let checksum = 0;
+  for (let i = 0; i < unescapedPayload.length; i++) {
+    checksum ^= unescapedPayload[i];
+  }
+
+  const fullPayload = Buffer.concat([unescapedPayload, Buffer.from([checksum])]);
+  const escaped = escapeJt808(fullPayload);
+  return Buffer.concat([Buffer.from([0x7e]), escaped, Buffer.from([0x7e])]);
+}
+
 function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }) {
   state.packetsReceived++;
+
+  // 1. JT808 Protocol (Starts with 0x7E)
+  if (buf[0] === 0x7e && buf.length >= 12) {
+    try {
+      const unescaped = unescapeJt808(buf);
+      if (unescaped.length >= 12 && unescaped[0] === 0x7e) {
+        const msgId = unescaped.readUInt16BE(1);
+        const phoneBcd = unescaped.subarray(5, 11);
+        let phoneStr = '';
+        for (let i = 5; i < 11; i++) {
+          phoneStr += ((unescaped[i] >> 4) & 0x0f).toString(16) + (unescaped[i] & 0x0f).toString(16);
+        }
+        phoneStr = phoneStr.replace(/^0+/, '');
+        const serial = unescaped.readUInt16BE(11);
+        const devId = phoneStr || knownIdRef.id || 'JT808_DOG';
+        knownIdRef.id = devId;
+
+        // A. 0x0100 Register Request -> Respond with 0x8100
+        if (msgId === 0x0100) {
+          const resp = buildJt808Response(0x8100, phoneBcd, serial, 0x0100, 0, 'AUTH_OK');
+          socket.write(resp);
+          log(`✅ [JT808 REGISTER OK] ID: ${devId}, Serial: ${serial}`, 'pkt');
+          return;
+        }
+
+        // B. 0x0102 Auth Request -> Respond with 0x8001
+        if (msgId === 0x0102) {
+          const resp = buildJt808Response(0x8001, phoneBcd, serial, 0x0102, 0);
+          socket.write(resp);
+          log(`✅ [JT808 AUTH OK] ID: ${devId}`, 'pkt');
+          return;
+        }
+
+        // C. 0x0002 Heartbeat -> Respond with 0x8001
+        if (msgId === 0x0002) {
+          const resp = buildJt808Response(0x8001, phoneBcd, serial, 0x0002, 0);
+          socket.write(resp);
+          log(`JT808 Heartbeat ID: ${devId}`, 'pkt');
+          return;
+        }
+
+        // D. 0x0200 Location Report
+        if (msgId === 0x0200 && unescaped.length >= 41) {
+          const resp = buildJt808Response(0x8001, phoneBcd, serial, 0x0200, 0);
+          socket.write(resp);
+
+          const alarmFlag = unescaped.readUInt32BE(13);
+          const statusFlag = unescaped.readUInt32BE(17);
+          const latRaw = unescaped.readUInt32BE(21);
+          const lonRaw = unescaped.readUInt32BE(25);
+          const speedRaw = unescaped.readUInt16BE(31);
+          const heading = unescaped.readUInt16BE(33);
+
+          let lat = Number((latRaw / 1000000.0).toFixed(6));
+          let lon = Number((lonRaw / 1000000.0).toFixed(6));
+          const speed = Number((speedRaw / 10.0).toFixed(1));
+
+          if ((statusFlag & 0x04) !== 0 && lat > 0) lat = -lat;
+          if ((statusFlag & 0x08) !== 0 && lon > 0) lon = -lon;
+
+          const isBark = (alarmFlag & 0x01) !== 0 || (alarmFlag & 0x08) !== 0 || (alarmFlag & 0x10) !== 0;
+
+          if (isBark) {
+            recordBark(devId, 'JT808 Hälytys');
+          }
+
+          const existing = state.devices.get(devId);
+          const barkingState = Boolean(existing?.isBarking && Date.now() - (existing.lastBarkTime || 0) <= 10000);
+          const barkRate = barkingState ? existing.barkRate || 0 : 0;
+
+          const point = {
+            id: devId,
+            lat,
+            lon,
+            speed,
+            battery: 90,
+            heading,
+            timestamp: Date.now(),
+            isBarking: barkingState,
+            barkRate
+          };
+
+          state.devices.set(devId, { ...point, lastSeen: Date.now(), protocol: 'ICAR_JT808' });
+          log(`📍 [JT808 GPS] ID:${devId} Lat:${lat} Lon:${lon} ${speed}km/h`, 'pkt');
+          forwardGps(point);
+          return;
+        }
+
+        // Generic fallback ACK
+        const genResp = buildJt808Response(0x8001, phoneBcd, serial, msgId, 0);
+        socket.write(genResp);
+        return;
+      }
+    } catch {
+      // Fall through to GT06
+    }
+  }
+
+  // 2. GT06 Protocol (0x78 0x78)
   if (buf.length >= 6 && buf[0] === 0x78 && buf[1] === 0x78) {
     const length = buf[2];
     const protocol = buf[3];

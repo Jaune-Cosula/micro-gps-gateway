@@ -11,7 +11,7 @@ export interface GpsPosition {
   battery: number; // 0 - 100 %
   heading: number; // 0 - 360 degrees
   timestamp: number; // Unix epoch ms
-  protocol?: 'SinoTrack' | 'ICAR_GT06' | 'ICAR_H02' | 'Manual_Test';
+  protocol?: 'SinoTrack' | 'ICAR_GT06' | 'ICAR_JT808' | 'ICAR_H02' | 'Manual_Test';
   rawPacket?: string;
   altitude?: number; // meters
   satellites?: number;
@@ -80,7 +80,7 @@ export interface GpsHistoryPoint {
 export interface DeviceState {
   id: string;
   name?: string;
-  protocol: 'SinoTrack' | 'ICAR_GT06' | 'ICAR_H02' | 'Manual_Test';
+  protocol: 'SinoTrack' | 'ICAR_GT06' | 'ICAR_JT808' | 'ICAR_H02' | 'Manual_Test';
   lastSeen: number;
   lat: number;
   lon: number;

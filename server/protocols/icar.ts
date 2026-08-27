@@ -1,6 +1,7 @@
 /**
  * ICAR IK122T Protocol Parser (Port 5023)
- * Implements GT06 Binary Protocol (0x01 login, 0x12/0x22 location, 0x13 status/heartbeat, 0x16/0x26 alarm)
+ * Implements GT06 Binary Protocol (0x01 login, 0x12/0x22 location, 0x13 status/heartbeat, 0x16/0x26 alarm),
+ * JT808 Binary Protocol (0x0100 register, 0x0102 auth, 0x0002 heartbeat, 0x0200 location),
  * and H02 ASCII protocol fallback with IK122T Pro barking detection.
  */
 import { GpsPosition } from '../../src/types';
@@ -19,8 +20,7 @@ export interface IcarParseResult {
 }
 
 /**
- * Converts 8-byte BCD buffer to IMEI / ID string
- * e.g. [0x07, 0x02, 0x62, 0x16, 0x73, 0x70, 0x00, 0x00] -> "7026216737" (strip trailing zeros if padding)
+ * Converts BCD buffer to string
  */
 export function bcdToString(buffer: Buffer, start: number, length: number): string {
   let result = '';
@@ -30,9 +30,92 @@ export function bcdToString(buffer: Buffer, start: number, length: number): stri
     const low = byte & 0x0f;
     result += high.toString(16) + low.toString(16);
   }
-  // Trim leading/trailing zeros if appropriate, but keep standard IMEI length (10-15 digits)
-  const trimmed = result.replace(/^0+/, '').replace(/0+$/, '');
-  return trimmed.length >= 7 ? trimmed : result;
+  const trimmed = result.replace(/^0+/, '');
+  return trimmed.length >= 6 ? trimmed : result;
+}
+
+/**
+ * JT808 Unescape: 0x7d 0x02 -> 0x7e, 0x7d 0x01 -> 0x7d
+ */
+export function unescapeJt808(buf: Buffer): Buffer {
+  const result: number[] = [];
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x7d && i + 1 < buf.length) {
+      if (buf[i + 1] === 0x02) {
+        result.push(0x7e);
+        i++;
+        continue;
+      } else if (buf[i + 1] === 0x01) {
+        result.push(0x7d);
+        i++;
+        continue;
+      }
+    }
+    result.push(buf[i]);
+  }
+  return Buffer.from(result);
+}
+
+/**
+ * JT808 Escape: 0x7e -> 0x7d 0x02, 0x7d -> 0x7d 0x01
+ */
+export function escapeJt808(body: Buffer): Buffer {
+  const result: number[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const b = body[i];
+    if (b === 0x7e) {
+      result.push(0x7d, 0x02);
+    } else if (b === 0x7d) {
+      result.push(0x7d, 0x01);
+    } else {
+      result.push(b);
+    }
+  }
+  return Buffer.from(result);
+}
+
+/**
+ * Builds JT808 Response Message (0x8100 Register Response or 0x8001 General Response)
+ */
+export function buildJt808Response(
+  respMsgId: number,
+  phoneBcd: Buffer,
+  clientSerial: number,
+  originalMsgId = 0,
+  result = 0,
+  authToken = 'AUTH_OK'
+): Buffer {
+  let body: Buffer;
+  if (respMsgId === 0x8100) {
+    const tokenBuf = Buffer.from(authToken, 'ascii');
+    body = Buffer.alloc(3 + tokenBuf.length);
+    body.writeUInt16BE(clientSerial, 0);
+    body[2] = result; // 0 = Success
+    tokenBuf.copy(body, 3);
+  } else {
+    // 0x8001 General Response
+    body = Buffer.alloc(5);
+    body.writeUInt16BE(clientSerial, 0);
+    body.writeUInt16BE(originalMsgId, 2);
+    body[4] = result; // 0 = Success
+  }
+
+  // Header: MsgId (2) + BodyProps (2) + Phone (6) + ServerSerial (2)
+  const header = Buffer.alloc(12);
+  header.writeUInt16BE(respMsgId, 0);
+  header.writeUInt16BE(body.length, 2);
+  phoneBcd.copy(header, 4, 0, Math.min(6, phoneBcd.length));
+  header.writeUInt16BE(1, 10);
+
+  const unescapedPayload = Buffer.concat([header, body]);
+  let checksum = 0;
+  for (let i = 0; i < unescapedPayload.length; i++) {
+    checksum ^= unescapedPayload[i];
+  }
+
+  const fullPayload = Buffer.concat([unescapedPayload, Buffer.from([checksum])]);
+  const escaped = escapeJt808(fullPayload);
+  return Buffer.concat([Buffer.from([0x7e]), escaped, Buffer.from([0x7e])]);
 }
 
 /**
@@ -65,7 +148,6 @@ export function mapGt06Battery(levelOrVoltage: number): number {
     return levels[levelOrVoltage] ?? 80;
   }
   if (levelOrVoltage <= 100) return levelOrVoltage;
-  // If voltage in mV (e.g. 4100 mV = 4.1V Li-ion)
   if (levelOrVoltage >= 3400 && levelOrVoltage <= 4200) {
     return Math.round(((levelOrVoltage - 3400) / (4200 - 3400)) * 100);
   }
@@ -76,19 +158,12 @@ export function mapGt06Battery(levelOrVoltage: number): number {
  * Checks if terminal status byte or alarm byte indicates a barking / vibration alarm
  */
 function isBarkingAlarm(terminalInfo: number, alarmByte?: number): { isBark: boolean; description: string } {
-  // Bits 3-5 in Terminal Info byte:
-  // 000 (0): Normal
-  // 001 (1): Shock / Vibration / Barking
-  // 010 (2): Cut power
-  // 011 (3): Low battery
-  // 100 (4): SOS
   const alarmBits = (terminalInfo >> 3) & 0x07;
   if (alarmBits === 1) {
     return { isBark: true, description: 'IK122T Tärinä/Haukkuhälytys (Terminal Bit 001)' };
   }
 
   if (alarmByte !== undefined) {
-    // 0x01 = SOS / Shock, 0x03 = Vibration / Shock (Bark), 0x09 = Vibration, 0x0A = Shock Alarm, 0x11 = Barking sensor
     if (alarmByte === 0x03 || alarmByte === 0x01 || alarmByte === 0x09 || alarmByte === 0x0a || alarmByte === 0x11) {
       return { isBark: true, description: `IK122T Haukkuhälytys (Alarm Code 0x${alarmByte.toString(16).padStart(2, '0')})` };
     }
@@ -125,6 +200,125 @@ export function parseIcarData(
         isBarking: isBark,
         alarmType: isBark ? 'ASCII Haukkusignaali' : undefined
       };
+    }
+  }
+
+  // JT808 Protocol check (Starts and ends with 0x7E)
+  if (buffer[0] === 0x7e && buffer.length >= 12) {
+    try {
+      const unescaped = unescapeJt808(buffer);
+      if (unescaped.length >= 12 && unescaped[0] === 0x7e) {
+        const msgId = unescaped.readUInt16BE(1);
+        const bodyProps = unescaped.readUInt16BE(3);
+        const bodyLen = bodyProps & 0x03ff;
+        const phoneBcd = unescaped.subarray(5, 11);
+        const phoneStr = bcdToString(unescaped, 5, 6);
+        const serial = unescaped.readUInt16BE(11);
+        const devId = phoneStr || knownDeviceId || 'JT808_DOG';
+
+        // 1. Terminal Registration (0x0100) -> Respond with 0x8100
+        if (msgId === 0x0100) {
+          const resp = buildJt808Response(0x8100, phoneBcd, serial, 0x0100, 0, 'AUTH_OK');
+          return {
+            position: null,
+            responseBuffer: resp,
+            deviceId: devId,
+            packetType: 'login'
+          };
+        }
+
+        // 2. Terminal Authentication (0x0102) -> Respond with 0x8001
+        if (msgId === 0x0102) {
+          const resp = buildJt808Response(0x8001, phoneBcd, serial, 0x0102, 0);
+          return {
+            position: null,
+            responseBuffer: resp,
+            deviceId: devId,
+            packetType: 'login'
+          };
+        }
+
+        // 3. Terminal Heartbeat (0x0002) -> Respond with 0x8001
+        if (msgId === 0x0002) {
+          const resp = buildJt808Response(0x8001, phoneBcd, serial, 0x0002, 0);
+          return {
+            position: null,
+            responseBuffer: resp,
+            deviceId: devId,
+            packetType: 'heartbeat'
+          };
+        }
+
+        // 4. Location Report (0x0200) -> Respond with 0x8001 and parse Lat/Lon
+        if (msgId === 0x0200 && unescaped.length >= 41) {
+          const resp = buildJt808Response(0x8001, phoneBcd, serial, 0x0200, 0);
+          const alarmFlag = unescaped.readUInt32BE(13);
+          const statusFlag = unescaped.readUInt32BE(17);
+          const latRaw = unescaped.readUInt32BE(21);
+          const lonRaw = unescaped.readUInt32BE(25);
+          const altitude = unescaped.readUInt16BE(29);
+          const speedRaw = unescaped.readUInt16BE(31);
+          const heading = unescaped.readUInt16BE(33);
+          
+          let lat = Number((latRaw / 1000000.0).toFixed(6));
+          let lon = Number((lonRaw / 1000000.0).toFixed(6));
+          const speed = Number((speedRaw / 10.0).toFixed(1));
+
+          // Hemispheres from status flag
+          if ((statusFlag & 0x04) !== 0 && lat > 0) lat = -lat; // South
+          if ((statusFlag & 0x08) !== 0 && lon > 0) lon = -lon; // West
+
+          // Check if alarm flag has vibration / SOS / barking
+          const isBark = (alarmFlag & 0x01) !== 0 || (alarmFlag & 0x08) !== 0 || (alarmFlag & 0x10) !== 0;
+
+          // Battery from TLV if available
+          let battery = 90;
+          let offset = 41;
+          while (offset + 2 < unescaped.length - 2) {
+            const extraId = unescaped[offset];
+            const extraLen = unescaped[offset + 1];
+            if (extraId === 0x25 && extraLen >= 2) {
+              battery = Math.min(100, Math.round(unescaped.readUInt16BE(offset + 2) / 10));
+            }
+            offset += 2 + extraLen;
+          }
+
+          const pos: GpsPosition = {
+            id: devId,
+            lat,
+            lon,
+            speed,
+            battery,
+            heading: Math.max(0, Math.min(360, heading)),
+            timestamp: Date.now(),
+            protocol: 'ICAR_JT808',
+            satellites: 12,
+            valid: (statusFlag & 0x02) !== 0,
+            rawPacket: buffer.toString('hex')
+          };
+
+          return {
+            position: pos,
+            responseBuffer: resp,
+            deviceId: devId,
+            packetType: isBark ? 'bark' : 'location',
+            isBarking: isBark,
+            alarmType: isBark ? 'JT808 Haukkuhälytys' : undefined,
+            battery
+          };
+        }
+
+        // Generic JT808 Fallback Response
+        const genResp = buildJt808Response(0x8001, phoneBcd, serial, msgId, 0);
+        return {
+          position: null,
+          responseBuffer: genResp,
+          deviceId: devId,
+          packetType: 'heartbeat'
+        };
+      }
+    } catch {
+      // Fall through to GT06 if error
     }
   }
 
