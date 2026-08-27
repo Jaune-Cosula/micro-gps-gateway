@@ -98,7 +98,7 @@ Lähetä pannan SIM-kortin puhelinnumeroon seuraavat SMS-viestit järjestyksess�
 
 ---
 
-### B) ICAR IK122T (Portti 5023 - GT06)
+### B) ICAR IK122T / IK122T Pro (Portti 5023 - GT06)
 Lähetä pannan numeroon:
 
 1. **Palvelin ja portti**:
@@ -117,7 +117,13 @@ Lähetä pannan numeroon:
    TIMER,10#
    ```
 
-4. **Tilan tarkistus**:
+4. **Haukunilmaisimen / Tärinähälytyksen aktivointi (IK122T Pro)**:
+   ```
+   VIBALM,1#
+   ```
+   *(tai `VIB,1#` / `SHOCK,1#` mallista riippuen. Panta alkaa lähettää GT06 0x13/0x26 hälytyspaketteja koiran haukkuessa, jolloin Gateway laskee haukkutiheyden ja välittää sen Erätutkaan).*
+
+5. **Tilan tarkistus**:
    ```
    PARAM#
    ```

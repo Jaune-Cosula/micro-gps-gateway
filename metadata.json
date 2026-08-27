@@ -1,6 +1,6 @@
 {
   "name": "Micro GPS Gateway",
-  "description": "Äärimmäisen kevyt GPS-mikropalvelin SinoTrack ST-904L ja ICAR IK122T koirapannoille, joka vastaanottaa raakadatan TCP-porteista ja välittää sen suoraan Erätutka-sovellukseen.",
+  "description": "Äärimmäisen kevyt GPS-mikropalvelin SinoTrack ST-904L ja ICAR IK122T / IK122T Pro -koirapannoille, joka vastaanottaa raakadatan ja haukkuhälytykset TCP-porteista ja välittää ne suoraan Erätutka-sovellukseen.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

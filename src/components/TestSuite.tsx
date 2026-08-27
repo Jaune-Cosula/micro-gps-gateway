@@ -473,6 +473,75 @@ export const TestSuite: React.FC<TestSuiteProps> = ({
             )}
           </div>
 
+          {/* IK122T Pro Haukunilmaisin Testaus */}
+          <div className="p-5 rounded-sm bg-[#1e1710] border border-[#f97316]/40 shadow-2xl">
+            <div className="flex items-center gap-2.5 mb-2.5">
+              <div className="w-7 h-7 rounded-sm bg-[#ea580c]/20 border border-[#f97316]/50 flex items-center justify-center text-[#fb923c] font-bold text-xs font-mono">
+                🔔
+              </div>
+              <div>
+                <h4 className="font-serif italic text-[#fb923c] text-base">
+                  IK122T Pro Haukunilmaisin (GT06 0x13)
+                </h4>
+                <p className="text-[11px] text-[#fdba74]/70">Haukku-/tärinähälytyksen ja tiheyden simulointi</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-[#fed7aa]/80 mb-3.5 leading-relaxed">
+              Testaa GT06 0x13/0x26 Status/Alarm -pakettien tunnistusta, liukuvaa 60s haukkutiheyden laskentaa (haukkua/min) ja välitystä Erätutkaan.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                id="sim-single-bark-btn"
+                type="button"
+                onClick={async () => {
+                  await fetch('/api/simulate/bark', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: manualId, burst: false })
+                  });
+                  onRefreshDevices();
+                }}
+                className="py-2 px-3 rounded-sm bg-[#ea580c]/20 hover:bg-[#ea580c]/35 border border-[#f97316]/60 text-[#fed7aa] font-medium text-xs transition flex items-center justify-center gap-1.5"
+              >
+                <span>🔔 Yksittäinen Haukku (0x13)</span>
+              </button>
+
+              <button
+                id="sim-bark-burst-btn"
+                type="button"
+                onClick={async () => {
+                  await fetch('/api/simulate/bark', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: manualId, burst: true, duration: 30, targetBpm: 78 })
+                  });
+                  onRefreshDevices();
+                }}
+                className="py-2 px-3 rounded-sm bg-[#ea580c] hover:bg-[#c2410c] text-[#ffffff] font-semibold text-xs transition flex items-center justify-center gap-1.5 shadow"
+              >
+                <span>📢 30s Sarja (78/min)</span>
+              </button>
+            </div>
+
+            <button
+              id="stop-bark-burst-btn"
+              type="button"
+              onClick={async () => {
+                await fetch('/api/simulate/bark/stop', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ id: manualId })
+                });
+                onRefreshDevices();
+              }}
+              className="mt-2 w-full py-1.5 px-3 rounded-sm bg-[#0F1115] hover:bg-[#20242D] border border-[#2A2D35] text-[#7E8492] hover:text-[#E0E2E5] text-[11px] transition"
+            >
+              Pysäytä haukkusarja
+            </button>
+          </div>
+
         </div>
 
       </div>

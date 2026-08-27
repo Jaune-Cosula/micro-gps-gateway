@@ -131,6 +131,40 @@ class CollarSimulator {
   }
 
   /**
+   * Generates a valid ICAR IK122T GT06 Status/Alarm Buffer (0x13) with barking indicator
+   */
+  public createIcarStatusBarkRaw(
+    batteryLevel = 5,
+    alarmType = 0x03 // 0x03 = Vibration / Barking Alarm
+  ): Buffer {
+    // 0x78 0x78 [Len=0x0A] [0x13] [Terminal Info] [Voltage] [GSM] [Alarm Code] [Language] [Serial] [CRC] 0x0D 0x0A
+    const buf = Buffer.alloc(15);
+    buf[0] = 0x78;
+    buf[1] = 0x78;
+    buf[2] = 0x0a; // Length
+    buf[3] = 0x13; // Protocol 0x13
+
+    // Terminal Info (Byte 4): Bit 3-5 is 001 (0x08 = Vibration Alarm)
+    buf[4] = 0x08 | 0x02; // Defense + Vibration alarm
+    buf[5] = batteryLevel; // Voltage / Battery
+    buf[6] = 0x04; // GSM Signal (4 bars)
+    buf[7] = alarmType; // Alarm code (0x03 = Vibration/Bark)
+    buf[8] = 0x01; // Language (English)
+
+    // Serial
+    const serial = Math.floor(Math.random() * 65000);
+    buf.writeUInt16BE(serial, 9);
+
+    // CRC over length + data (bytes 2 to 10)
+    const crc = getCrc16(buf, 2, 9);
+    buf.writeUInt16BE(crc, 11);
+
+    buf[13] = 0x0d;
+    buf[14] = 0x0a;
+    return buf;
+  }
+
+  /**
    * Simulates a single raw SinoTrack packet
    */
   public async simulateSinoTrack(
@@ -189,6 +223,85 @@ class CollarSimulator {
       return await gatewayState.handlePosition(parsed.position, rawHex);
     }
     return null;
+  }
+
+  /**
+   * Simulates an IK122T GT06 0x13 Bark Alarm Status Packet
+   */
+  public async simulateIcarBark(deviceId = '868120394857211') {
+    const rawBuffer = this.createIcarStatusBarkRaw(5, 0x03);
+    const rawHex = rawBuffer.toString('hex');
+
+    gatewayState.addLog({
+      id: 'sim-bark-' + Date.now(),
+      timestamp: Date.now(),
+      type: 'simulated',
+      protocol: 'IK122T (0x13 Bark)',
+      deviceId,
+      rawHex,
+      message: `[Simulaattori] IK122T Pro GT06 0x13 Haukku-hälytyspaketti generoitu (${rawBuffer.length} tavua): ${rawHex}`
+    });
+
+    const parsed = parseIcarData(rawBuffer, deviceId);
+    if (parsed.isBarking) {
+      await gatewayState.recordBark(deviceId, Date.now(), 'GT06 0x13 Vibration/Bark');
+    }
+    return { success: true, hex: rawHex, parsed };
+  }
+
+  private barkBurstTimers = new Map<string, NodeJS.Timeout>();
+
+  /**
+   * Simulates a realistic barking burst (e.g. 60 seconds standing bark at 70-80 barks/min)
+   */
+  public startBarkBurst(deviceId = '7026216737', durationSeconds = 30, targetBpm = 75) {
+    this.stopBarkBurst(deviceId);
+
+    const intervalMs = Math.round((60 / targetBpm) * 1000);
+    const endTime = Date.now() + durationSeconds * 1000;
+
+    const fireBark = async () => {
+      if (Date.now() > endTime) {
+        this.stopBarkBurst(deviceId);
+        return;
+      }
+
+      await gatewayState.recordBark(deviceId, Date.now(), `IK122T Seisontahaukku (${targetBpm}/min)`);
+
+      const jitter = (Math.random() - 0.5) * 200;
+      const nextDelay = Math.max(400, intervalMs + jitter);
+      const timer = setTimeout(fireBark, nextDelay);
+      this.barkBurstTimers.set(deviceId, timer);
+    };
+
+    gatewayState.addLog({
+      id: 'burst-start-' + Date.now(),
+      timestamp: Date.now(),
+      type: 'system',
+      deviceId,
+      message: `[Simulaattori] Haukkusarja käynnistetty koiralle ${deviceId}: ${targetBpm} haukkua/min (${durationSeconds}s kesto)`
+    });
+
+    fireBark();
+  }
+
+  public stopBarkBurst(deviceId: string) {
+    const timer = this.barkBurstTimers.get(deviceId);
+    if (timer) {
+      clearTimeout(timer);
+      this.barkBurstTimers.delete(deviceId);
+      gatewayState.addLog({
+        id: 'burst-stop-' + Date.now(),
+        timestamp: Date.now(),
+        type: 'system',
+        deviceId,
+        message: `[Simulaattori] Haukkusarja pysäytetty koiralle ${deviceId}`
+      });
+    }
+  }
+
+  public isBarkBurstActive(deviceId: string): boolean {
+    return this.barkBurstTimers.has(deviceId);
   }
 
   /**

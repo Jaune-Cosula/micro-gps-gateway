@@ -177,6 +177,12 @@ export class GpsTcpServer {
           });
         }
 
+        // If barking was detected in 0x13/0x26/ASCII status packet
+        if (result.isBarking) {
+          const id = knownDeviceId || result.deviceId || 'IK122T_COLLAR';
+          await gatewayState.recordBark(id, Date.now(), result.alarmType || 'IK122T GT06 0x13');
+        }
+
         // If location was parsed, forward to Erätutka
         if (result.position) {
           await gatewayState.handlePosition(result.position, rawHex);

@@ -23,7 +23,9 @@ export async function forwardToEratutka(
     speed: Number(position.speed),
     battery: Number(position.battery),
     heading: Number(position.heading),
-    timestamp: Number(position.timestamp || Date.now())
+    timestamp: Number(position.timestamp || Date.now()),
+    isBarking: Boolean(position.isBarking),
+    barkRate: Number(position.barkRate || 0)
   };
 
   const jsonBody = JSON.stringify(payload);

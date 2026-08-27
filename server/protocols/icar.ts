@@ -1,7 +1,7 @@
 /**
  * ICAR IK122T Protocol Parser (Port 5023)
- * Implements GT06 Binary Protocol (0x01 login, 0x12/0x22 location, 0x13 heartbeat)
- * and H02 ASCII protocol fallback.
+ * Implements GT06 Binary Protocol (0x01 login, 0x12/0x22 location, 0x13 status/heartbeat, 0x16/0x26 alarm)
+ * and H02 ASCII protocol fallback with IK122T Pro barking detection.
  */
 import { GpsPosition } from '../../src/types';
 import { getCrc16 } from './crc';
@@ -11,7 +11,11 @@ export interface IcarParseResult {
   position: GpsPosition | null;
   responseBuffer: Buffer | null;
   deviceId?: string;
-  packetType: 'login' | 'location' | 'heartbeat' | 'alarm' | 'ascii' | 'unknown';
+  packetType: 'login' | 'location' | 'heartbeat' | 'alarm' | 'bark' | 'ascii' | 'unknown';
+  isBarking?: boolean;
+  alarmType?: string;
+  alarmCode?: number;
+  battery?: number;
 }
 
 /**
@@ -55,7 +59,7 @@ export function buildGt06Ack(protocolByte: number, serialNumber: number): Buffer
 /**
  * Maps GT06 battery level (0-6) or raw voltage to percentage
  */
-function mapGt06Battery(levelOrVoltage: number): number {
+export function mapGt06Battery(levelOrVoltage: number): number {
   if (levelOrVoltage <= 6) {
     const levels = [0, 10, 25, 50, 75, 90, 100];
     return levels[levelOrVoltage] ?? 80;
@@ -66,6 +70,31 @@ function mapGt06Battery(levelOrVoltage: number): number {
     return Math.round(((levelOrVoltage - 3400) / (4200 - 3400)) * 100);
   }
   return 85;
+}
+
+/**
+ * Checks if terminal status byte or alarm byte indicates a barking / vibration alarm
+ */
+function isBarkingAlarm(terminalInfo: number, alarmByte?: number): { isBark: boolean; description: string } {
+  // Bits 3-5 in Terminal Info byte:
+  // 000 (0): Normal
+  // 001 (1): Shock / Vibration / Barking
+  // 010 (2): Cut power
+  // 011 (3): Low battery
+  // 100 (4): SOS
+  const alarmBits = (terminalInfo >> 3) & 0x07;
+  if (alarmBits === 1) {
+    return { isBark: true, description: 'IK122T Tärinä/Haukkuhälytys (Terminal Bit 001)' };
+  }
+
+  if (alarmByte !== undefined) {
+    // 0x01 = SOS / Shock, 0x03 = Vibration / Shock (Bark), 0x09 = Vibration, 0x0A = Shock Alarm, 0x11 = Barking sensor
+    if (alarmByte === 0x03 || alarmByte === 0x01 || alarmByte === 0x09 || alarmByte === 0x0a || alarmByte === 0x11) {
+      return { isBark: true, description: `IK122T Haukkuhälytys (Alarm Code 0x${alarmByte.toString(16).padStart(2, '0')})` };
+    }
+  }
+
+  return { isBark: false, description: 'Normaali tilapäivitys' };
 }
 
 /**
@@ -83,19 +112,24 @@ export function parseIcarData(
   if (buffer[0] === 0x2a || buffer[0] === 0x5b || buffer[0] === 0x28) {
     const asciiStr = buffer.toString('utf8');
     const pos = parseSinoTrackPacket(asciiStr);
+    const isBark = /bark|barking|vib|vibration|shock|alm:01|alm:03/i.test(asciiStr);
+    
     if (pos) {
       pos.protocol = 'ICAR_H02';
+      pos.isBarking = isBark;
       return {
         position: pos,
         responseBuffer: null,
         deviceId: pos.id,
-        packetType: 'ascii'
+        packetType: isBark ? 'bark' : 'ascii',
+        isBarking: isBark,
+        alarmType: isBark ? 'ASCII Haukkusignaali' : undefined
       };
     }
   }
 
   // GT06 Binary protocol check (Header 0x78 0x78 or 0x79 0x79)
-  if (buffer.length >= 6 && buffer[0] === 0x78 && buffer[1] === 0x78) {
+  if (buffer.length >= 6 && (buffer[0] === 0x78 || buffer[0] === 0x79) && (buffer[1] === 0x78 || buffer[1] === 0x79)) {
     const length = buffer[2];
     const protocol = buffer[3];
 
@@ -114,7 +148,7 @@ export function parseIcarData(
       };
     }
 
-    // Protocol 0x12 / 0x22: Location Data Packet
+    // Protocol 0x12 / 0x22: Standard Location Data Packet
     if ((protocol === 0x12 || protocol === 0x22) && buffer.length >= 18) {
       try {
         // Date Time (Bytes 4-9): Year (offset 2000), Month, Day, Hour, Min, Sec
@@ -149,8 +183,6 @@ export function parseIcarData(
           heading = courseStatus & 0x03ff; // bits 0-9
 
           // Bit flags for hemisphere
-          // Bit 2 (0x04) of upper byte (courseStatus & 0x0400): 0 = South, 1 = North (or vice versa in some trackers)
-          // Bit 3 (0x08) of upper byte (courseStatus & 0x0800): 1 = West, 0 = East
           const isWest = (courseStatus & 0x0800) !== 0;
           const isSouth = (courseStatus & 0x0400) === 0;
 
@@ -164,7 +196,6 @@ export function parseIcarData(
         // Battery: GT06 sometimes includes voltage/battery status in subsequent bytes
         let battery = 90;
         if (buffer.length > 26) {
-          // Check terminal info or voltage bytes
           const possibleBat = buffer[26];
           battery = mapGt06Battery(possibleBat);
         }
@@ -188,13 +219,12 @@ export function parseIcarData(
           rawPacket: buffer.toString('hex')
         };
 
-        // If packet has serial, we can build ACK if needed
+        // If packet has serial, build ACK
         let ack: Buffer | null = null;
         if (buffer.length >= 26) {
           const stopIdx = buffer.indexOf(Buffer.from([0x0d, 0x0a]));
           if (stopIdx >= 4) {
             const serial = buffer.readUInt16BE(stopIdx - 4);
-            // Location ACKs are optional in GT06, but beneficial for some firmwares
             ack = buildGt06Ack(protocol, serial);
           }
         }
@@ -210,12 +240,86 @@ export function parseIcarData(
       }
     }
 
-    // Protocol 0x13: Heartbeat / Status
-    if (protocol === 0x13 && buffer.length >= 8) {
-      let battery = 85;
-      if (buffer.length > 5) {
-        battery = mapGt06Battery(buffer[5]);
+    // Protocol 0x16 / 0x26: Alarm Data Packet (Location + Alarm Status / Barking)
+    if ((protocol === 0x16 || protocol === 0x26) && buffer.length >= 20) {
+      try {
+        const year = 2000 + buffer[4];
+        const month = buffer[5] - 1;
+        const day = buffer[6];
+        const hour = buffer[7];
+        const min = buffer[8];
+        const sec = buffer[9];
+        const timestamp = new Date(Date.UTC(year, month, day, hour, min, sec)).getTime();
+
+        const satByte = buffer[10];
+        const satellites = satByte & 0x0f;
+        const latRaw = buffer.readUInt32BE(11);
+        let lat = Number((latRaw / 1800000.0).toFixed(6));
+        const lonRaw = buffer.readUInt32BE(15);
+        let lon = Number((lonRaw / 1800000.0).toFixed(6));
+        const speed = buffer.length > 19 ? buffer[19] : 0;
+
+        let heading = 0;
+        let valid = true;
+        if (buffer.length > 21) {
+          const courseStatus = buffer.readUInt16BE(20);
+          heading = courseStatus & 0x03ff;
+          valid = (courseStatus & 0x1000) !== 0;
+        }
+
+        // Terminal Info & Alarm status bytes
+        const termInfo = buffer.length > 28 ? buffer[28] : 0;
+        const voltage = buffer.length > 29 ? buffer[29] : 5;
+        const alarmCode = buffer.length > 31 ? buffer[31] : 0x03;
+
+        const barkCheck = isBarkingAlarm(termInfo, alarmCode);
+        const battery = mapGt06Battery(voltage);
+        const deviceId = knownDeviceId || 'ICAR_DOG';
+
+        const pos: GpsPosition = {
+          id: deviceId,
+          lat,
+          lon,
+          speed: Number(speed.toFixed(1)),
+          battery,
+          heading: Math.max(0, Math.min(360, heading)),
+          timestamp: isNaN(timestamp) ? Date.now() : timestamp,
+          protocol: 'ICAR_GT06',
+          satellites,
+          valid,
+          isBarking: barkCheck.isBark,
+          rawPacket: buffer.toString('hex')
+        };
+
+        const stopIdx = buffer.indexOf(Buffer.from([0x0d, 0x0a]));
+        const serial = stopIdx >= 4 ? buffer.readUInt16BE(stopIdx - 4) : 1;
+        const ack = buildGt06Ack(protocol, serial);
+
+        return {
+          position: pos,
+          responseBuffer: ack,
+          deviceId,
+          packetType: barkCheck.isBark ? 'bark' : 'alarm',
+          isBarking: barkCheck.isBark,
+          alarmType: barkCheck.description,
+          alarmCode,
+          battery
+        };
+      } catch {
+        return { position: null, responseBuffer: null, packetType: 'unknown' };
       }
+    }
+
+    // Protocol 0x13: Status / Heartbeat / Bark Alarm Packet
+    if (protocol === 0x13 && buffer.length >= 8) {
+      const termInfo = buffer[4];
+      const voltage = buffer.length > 5 ? buffer[5] : 5;
+      const gsm = buffer.length > 6 ? buffer[6] : 0;
+      const alarmCode = buffer.length > 7 ? buffer[7] : undefined;
+
+      const barkCheck = isBarkingAlarm(termInfo, alarmCode);
+      const battery = mapGt06Battery(voltage);
+
       const stopIdx = buffer.indexOf(Buffer.from([0x0d, 0x0a]));
       const serial = stopIdx >= 4 ? buffer.readUInt16BE(stopIdx - 4) : 1;
       const ack = buildGt06Ack(0x13, serial);
@@ -224,10 +328,15 @@ export function parseIcarData(
         position: null,
         responseBuffer: ack,
         deviceId: knownDeviceId,
-        packetType: 'heartbeat'
+        packetType: barkCheck.isBark ? 'bark' : 'heartbeat',
+        isBarking: barkCheck.isBark,
+        alarmType: barkCheck.description,
+        alarmCode,
+        battery
       };
     }
   }
 
   return { position: null, responseBuffer: null, packetType: 'unknown' };
 }
+

@@ -60,6 +60,12 @@ export const PacketLogs: React.FC<PacketLogsProps> = ({ logs, onClearLogs }) => 
 
   const getLogBadge = (entry: LogEntry) => {
     switch (entry.type) {
+      case 'bark_alarm':
+        return (
+          <span className="px-2 py-0.5 rounded-sm text-[10px] font-mono bg-[#ea580c]/20 text-[#fb923c] border border-[#f97316]/50 flex items-center gap-1 font-bold animate-pulse">
+            🔔 Haukku-alarm
+          </span>
+        );
       case 'forward_success':
         return (
           <span className="px-2 py-0.5 rounded-sm text-[10px] font-mono bg-[#181B22] text-[#4ADE80] border border-[#4ADE80]/30 flex items-center gap-1">

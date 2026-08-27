@@ -16,6 +16,9 @@ export interface GpsPosition {
   altitude?: number; // meters
   satellites?: number;
   valid?: boolean;
+  isBarking?: boolean; // True if dog is currently barking
+  barkRate?: number; // Barks per minute (e.g. 65)
+  lastBarkTimestamp?: number;
 }
 
 export interface ForwardResult {
@@ -34,6 +37,8 @@ export interface ForwardResult {
     battery: number;
     heading: number;
     timestamp: number;
+    isBarking?: boolean;
+    barkRate?: number;
   };
   responseBody?: string;
 }
@@ -41,7 +46,7 @@ export interface ForwardResult {
 export interface LogEntry {
   id: string;
   timestamp: number;
-  type: 'tcp_in' | 'forward_success' | 'forward_error' | 'login_ack' | 'system' | 'simulated';
+  type: 'tcp_in' | 'forward_success' | 'forward_error' | 'login_ack' | 'system' | 'simulated' | 'bark_alarm';
   protocol?: string;
   deviceId?: string;
   message: string;
@@ -55,6 +60,20 @@ export interface TrailPoint {
   lon: number;
   speed: number;
   heading: number;
+  timestamp: number;
+  isBarking?: boolean;
+  barkRate?: number;
+}
+
+export interface GpsHistoryPoint {
+  lat: number;
+  lng: number;
+  speed: number;
+  battery: number;
+  heading: number;
+  barkRate: number;
+  isBarking: boolean;
+  satellites: number;
   timestamp: number;
 }
 
@@ -72,6 +91,10 @@ export interface DeviceState {
   online: boolean;
   trail: TrailPoint[];
   lastRawPacket?: string;
+  isBarking?: boolean;
+  barkRate?: number;
+  lastBarkTime?: number;
+  totalBarks?: number;
   lastForwardStatus?: {
     success: boolean;
     timestamp: number;

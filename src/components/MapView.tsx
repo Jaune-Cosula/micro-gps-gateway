@@ -78,35 +78,46 @@ export const MapView: React.FC<MapViewProps> = ({
       const isSelected = selectedDevice?.id === dev.id;
       const isOnline = Date.now() - dev.lastSeen < 180000;
 
-      // Custom HTML Marker with dog icon and rotating direction pointer
+      // Custom HTML Marker with dog icon and rotating direction pointer + barking radar
+      const isBarking = Boolean(dev.isBarking);
+      const barkRate = dev.barkRate || 0;
+
       const customIcon = L.divIcon({
         className: 'custom-collar-marker',
         html: `
-          <div style="position: relative; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;">
+          <div style="position: relative; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center;">
             ${
-              isOnline
+              isBarking
+                ? '<div style="position: absolute; width: 56px; height: 56px; border-radius: 50%; background: rgba(249, 115, 22, 0.35); border: 2px solid #ea580c; animation: ping 1.2s cubic-bezier(0, 0, 0.2, 1) infinite;"></div><div style="position: absolute; width: 44px; height: 44px; border-radius: 50%; background: rgba(249, 115, 22, 0.2); animation: pulse 1s infinite;"></div>'
+                : isOnline
                 ? '<div style="position: absolute; width: 44px; height: 44px; border-radius: 50%; background: rgba(74, 222, 128, 0.2); animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>'
                 : ''
             }
             <div style="position: relative; width: 34px; height: 34px; border-radius: 50%; background: ${
-              isSelected ? '#181B22' : '#0F1115'
+              isBarking ? '#2e190e' : isSelected ? '#181B22' : '#0F1115'
             }; border: 2px solid ${
-          isSelected ? '#D4AF37' : '#4ADE80'
+          isBarking ? '#F97316' : isSelected ? '#D4AF37' : '#4ADE80'
         }; box-shadow: 0 4px 16px rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; color: white; font-size: 16px;">
-              🐕
-              <div style="position: absolute; top: -6px; right: -6px; width: 15px; height: 15px; border-radius: 50%; background: #D4AF37; border: 1.5px solid #0F1115; display: flex; align-items: center; justify-content: center; transform: rotate(${
+              ${isBarking ? '📢' : '🐕'}
+              <div style="position: absolute; top: -6px; right: -6px; width: 15px; height: 15px; border-radius: 50%; background: ${
+                isBarking ? '#F97316' : '#D4AF37'
+              }; border: 1.5px solid #0F1115; display: flex; align-items: center; justify-content: center; transform: rotate(${
                 dev.heading
               }deg); transition: transform 0.3s;">
                 <svg width="8" height="8" viewBox="0 0 24 24" fill="#0F1115"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>
               </div>
             </div>
-            <div style="position: absolute; bottom: -18px; white-space: nowrap; background: rgba(15, 17, 21, 0.95); color: #E0E2E5; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 2px; border: 1px solid #2A2D35; pointer-events: none; font-family: monospace;">
-              ${dev.name || dev.id} (${dev.speed} km/h)
+            <div style="position: absolute; bottom: -20px; white-space: nowrap; background: ${
+              isBarking ? 'rgba(234, 88, 12, 0.95)' : 'rgba(15, 17, 21, 0.95)'
+            }; color: ${isBarking ? '#ffffff' : '#E0E2E5'}; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 2px; border: 1px solid ${
+          isBarking ? '#fb923c' : '#2A2D35'
+        }; pointer-events: none; font-family: monospace; box-shadow: 0 2px 8px rgba(0,0,0,0.5);">
+              ${isBarking ? `🔔 HAUKKUU ${barkRate}/min` : `${dev.name || dev.id} (${dev.speed} km/h)`}
             </div>
           </div>
         `,
-        iconSize: [44, 44],
-        iconAnchor: [22, 22],
+        iconSize: [48, 48],
+        iconAnchor: [24, 24],
       });
 
       // Update or create marker

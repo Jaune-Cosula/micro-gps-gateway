@@ -237,10 +237,25 @@ export const GceGuide: React.FC = () => {
                 </button>
               </div>
 
-              {/* Step 4 Param */}
+              {/* Step 4 Bark Alarm (IK122T Pro) */}
+              <div className="p-2.5 rounded-sm bg-[#1e1710] border border-[#f97316]/40 flex items-center justify-between">
+                <div>
+                  <div className="text-[9px] text-[#fb923c] uppercase tracking-wider font-bold">4. Haukunilmaisin (IK122T Pro):</div>
+                  <div className="text-[#fed7aa] font-bold">VIBALM,1#</div>
+                  <div className="text-[10px] text-[#fdba74]/70 font-sans mt-0.5">Aktivoi haukku-/tärinähälytykset (0x13 GT06)</div>
+                </div>
+                <button
+                  onClick={() => handleCopy('VIBALM,1#', 'icar-bark')}
+                  className="p-1.5 rounded-sm hover:bg-[#20242D] text-[#fb923c] hover:text-white transition"
+                >
+                  {copiedKey === 'icar-bark' ? <Check className="w-3.5 h-3.5 text-[#4ADE80]" /> : <Copy className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+
+              {/* Step 5 Param */}
               <div className="p-2.5 rounded-sm bg-[#181B22] border border-[#2A2D35] flex items-center justify-between">
                 <div>
-                  <div className="text-[9px] text-[#7E8492] uppercase tracking-wider">4. Tilan tarkistus:</div>
+                  <div className="text-[9px] text-[#7E8492] uppercase tracking-wider">5. Tilan tarkistus:</div>
                   <div className="text-[#E0E2E5]">PARAM#</div>
                 </div>
                 <button
@@ -267,7 +282,7 @@ export const GceGuide: React.FC = () => {
         <div className="p-4 rounded-sm bg-[#0F1115] border border-[#2A2D35] space-y-2">
           <div className="flex items-center justify-between">
             <span className="font-medium text-xs text-[#E0E2E5]">
-              Vaihe 1: Avaa GCP VPC Palomuuri (TCP 5013, 5023, 8080)
+              Vaihe 1: Avaa GCP VPC Palomuuri (Google Cloud Shellissä tai GCP Konsolissa)
             </span>
             <button
               onClick={() => handleCopy(gcloudFirewallCmd, 'fw-cmd')}
@@ -277,6 +292,9 @@ export const GceGuide: React.FC = () => {
               <span>Kopioi gcloud-komento</span>
             </button>
           </div>
+          <p className="text-[11px] text-[#7E8492]">
+            💡 <em>Huom:</em> Aja tämä komento <strong>Google Cloud Shellissä</strong> (GCP Konsolin yläkulman <code className="text-[#D4AF37]">&gt;_</code> pääte) tai luo sääntö GCP Konsolin <strong>VPC-verkko &gt; Palomuurit</strong> -sivulta. (Virtuaalikoneen omalla oletustilillä ei ole oikeutta muokata projektin palomuuria).
+          </p>
           <pre className="p-2.5 rounded-sm bg-[#08090C] border border-[#2A2D35] text-[11px] text-[#E0E2E5] font-mono overflow-x-auto">
             {gcloudFirewallCmd}
           </pre>

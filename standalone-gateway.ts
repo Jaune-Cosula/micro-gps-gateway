@@ -38,8 +38,61 @@ const state = {
   forwardErrors: 0,
   activeSockets: 0,
   devices: new Map<string, any>(),
+  barkTimestamps: new Map<string, number[]>(),
   recentLogs: [] as Array<{ time: string; msg: string; type: string }>
 };
+
+function recordBark(deviceId: string, source = 'IK122T GT06 0x13') {
+  const now = Date.now();
+  const timestamps = state.barkTimestamps.get(deviceId) || [];
+  timestamps.push(now);
+  const cutoff = now - 60000;
+  const recent = timestamps.filter((t) => t >= cutoff);
+  state.barkTimestamps.set(deviceId, recent);
+
+  let barkRate = recent.length;
+  if (recent.length >= 2) {
+    const windowSec = Math.max(2, (recent[recent.length - 1] - recent[0]) / 1000);
+    if (windowSec < 60) barkRate = Math.round((recent.length / windowSec) * 60);
+  }
+  barkRate = Math.min(140, Math.max(1, barkRate));
+
+  let dev = state.devices.get(deviceId);
+  if (!dev) {
+    dev = {
+      id: deviceId,
+      lat: 60.85214,
+      lon: 25.68142,
+      speed: 0,
+      battery: 88,
+      heading: 0,
+      protocol: 'ICAR_GT06',
+      lastSeen: now
+    };
+  }
+
+  dev.isBarking = true;
+  dev.barkRate = barkRate;
+  dev.lastBarkTime = now;
+  dev.totalBarks = (dev.totalBarks || 0) + 1;
+  dev.lastSeen = now;
+  state.devices.set(deviceId, dev);
+
+  log(`🔔 [HAUKKU] Koira haukkuu! (${deviceId}) -> ${barkRate} haukkua/min (${source})`, 'pkt');
+  forwardGps({ ...dev, timestamp: now });
+}
+
+// Bark decay check
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, dev] of state.devices.entries()) {
+    if (dev.isBarking && now - (dev.lastBarkTime || 0) > 10000) {
+      dev.isBarking = false;
+      dev.barkRate = 0;
+      state.barkTimestamps.set(id, []);
+    }
+  }
+}, 2000);
 
 function log(msg: string, type: 'info' | 'pkt' | 'fwd' | 'err' = 'info') {
   const time = new Date().toISOString().substring(11, 19);
@@ -105,10 +158,22 @@ async function forwardGps(payload: {
   battery: number;
   heading: number;
   timestamp: number;
+  isBarking?: boolean;
+  barkRate?: number;
 }) {
   if (!CONFIG.FORWARDING_ENABLED) return;
 
-  const jsonStr = JSON.stringify(payload);
+  const jsonStr = JSON.stringify({
+    id: String(payload.id),
+    lat: Number(payload.lat),
+    lon: Number(payload.lon),
+    speed: Number(payload.speed),
+    battery: Number(payload.battery),
+    heading: Number(payload.heading),
+    timestamp: Number(payload.timestamp || Date.now()),
+    isBarking: Boolean(payload.isBarking),
+    barkRate: Number(payload.barkRate || 0)
+  });
   const parsed = new URL(CONFIG.ERATUTKA_URL);
   const client = parsed.protocol === 'https:' ? https : http;
 
@@ -130,7 +195,8 @@ async function forwardGps(payload: {
       res.on('end', () => {
         if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
           state.packetsForwarded++;
-          log(`Erätutka OK [${res.statusCode}] -> Laite ${payload.id}: lat=${payload.lat}, lon=${payload.lon}`, 'fwd');
+          const barkMsg = payload.isBarking ? ` [🔔 HAUKKUU ${payload.barkRate || 0}/min]` : '';
+          log(`Erätutka OK [${res.statusCode}] -> Laite ${payload.id}: lat=${payload.lat}, lon=${payload.lon}${barkMsg}`, 'fwd');
         } else {
           state.forwardErrors++;
           log(`Erätutka VIRHE [${res.statusCode}] -> ${data.slice(0, 100)}`, 'err');
@@ -182,6 +248,9 @@ function handleSinoTrack(raw: string) {
     }
 
     if (lat !== 0 || lon !== 0) {
+      const existing = state.devices.get(id);
+      const isBarking = Boolean(existing?.isBarking && Date.now() - (existing.lastBarkTime || 0) <= 10000);
+      const barkRate = isBarking ? existing.barkRate || 0 : 0;
       const point = {
         id,
         lat,
@@ -189,7 +258,9 @@ function handleSinoTrack(raw: string) {
         speed: Number(speed.toFixed(1)),
         battery,
         heading,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        isBarking,
+        barkRate
       };
       state.devices.set(id, { ...point, lastSeen: Date.now(), protocol: 'SinoTrack' });
       log(`SinoTrack ID:${id} Lat:${lat} Lon:${lon} ${speed}km/h Akku:${battery}%`, 'pkt');
@@ -201,6 +272,7 @@ function handleSinoTrack(raw: string) {
 function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }) {
   state.packetsReceived++;
   if (buf.length >= 6 && buf[0] === 0x78 && buf[1] === 0x78) {
+    const length = buf[2];
     const protocol = buf[3];
 
     // Login (0x01)
@@ -218,8 +290,46 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
       return;
     }
 
-    // Location (0x12 / 0x22)
-    if ((protocol === 0x12 || protocol === 0x22) && buf.length >= 18) {
+    // Status packet (0x13) - Heartbeat & Vibration/Bark Alarm
+    if (protocol === 0x13) {
+      const serialOffset = Math.max(4, length + 2 - 4);
+      let serial = 1;
+      if (buf.length >= serialOffset + 2) {
+        serial = buf.readUInt16BE(serialOffset);
+      }
+      const ack = buildGt06Ack(0x13, serial);
+      socket.write(ack);
+
+      // Check vibration alarm in terminal info byte (byte 4) or alarm byte (byte 7)
+      const termInfo = buf[4];
+      const alarmCode = buf.length > 7 ? buf[7] : 0;
+      const isVibrationOrBark = ((termInfo & 0x38) === 0x08) || [0x01, 0x03, 0x09, 0x0a, 0x11].includes(alarmCode);
+
+      const id = knownIdRef.id || 'IK122T_DOG';
+      if (isVibrationOrBark) {
+        recordBark(id, 'GT06 0x13 Status/Vibration Alarm');
+      } else {
+        log(`ICAR 0x13 Heartbeat kuitattu ID: ${id}`, 'pkt');
+      }
+      return;
+    }
+
+    // Alarm packet (0x16 / 0x26)
+    if (protocol === 0x16 || protocol === 0x26) {
+      const serialOffset = Math.max(4, length + 2 - 4);
+      let serial = 1;
+      if (buf.length >= serialOffset + 2) {
+        serial = buf.readUInt16BE(serialOffset);
+      }
+      const ack = buildGt06Ack(protocol, serial);
+      socket.write(ack);
+
+      const id = knownIdRef.id || 'IK122T_DOG';
+      recordBark(id, `GT06 0x${protocol.toString(16)} Alarm`);
+    }
+
+    // Location (0x12 / 0x22 / 0x16 / 0x26)
+    if ((protocol === 0x12 || protocol === 0x22 || protocol === 0x16 || protocol === 0x26) && buf.length >= 18) {
       const latRaw = buf.readUInt32BE(11);
       const lonRaw = buf.readUInt32BE(15);
       let lat = Number((latRaw / 1800000.0).toFixed(6));
@@ -231,6 +341,10 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
         heading = cs & 0x03ff;
       }
       const id = knownIdRef.id || 'ICAR_DOG';
+      const existing = state.devices.get(id);
+      const isBarking = Boolean(existing?.isBarking && Date.now() - (existing.lastBarkTime || 0) <= 10000);
+      const barkRate = isBarking ? existing.barkRate || 0 : 0;
+
       const point = {
         id,
         lat,
@@ -238,7 +352,9 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
         speed,
         battery: 88,
         heading,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        isBarking,
+        barkRate
       };
       state.devices.set(id, { ...point, lastSeen: Date.now(), protocol: 'ICAR' });
       log(`ICAR GT06 ID:${id} Lat:${lat} Lon:${lon} ${speed}km/h`, 'pkt');
@@ -304,7 +420,9 @@ const httpServer = http.createServer((req, res) => {
   const devRows = Array.from(state.devices.values())
     .map(
       (d) =>
-        `<tr><td><b>${d.id}</b></td><td>${d.protocol}</td><td>${d.lat}, ${d.lon}</td><td>${d.speed} km/h</td><td>${d.battery}%</td><td>${new Date(d.lastSeen).toLocaleTimeString()}</td></tr>`
+        `<tr><td><b>${d.id}</b></td><td>${d.protocol}</td><td>${d.lat}, ${d.lon}</td><td>${d.speed} km/h</td><td>${d.battery}%</td><td>${
+          d.isBarking ? `<span style="background:#f0883e;color:#000;font-weight:bold;padding:2px 8px;border-radius:10px;">🔔 HAUKKUU (${d.barkRate || 0}/min)</span>` : '<span style="color:#8b949e">Hiljaa</span>'
+        }</td><td>${new Date(d.lastSeen).toLocaleTimeString()}</td></tr>`
     )
     .join('');
 
@@ -333,7 +451,7 @@ const httpServer = http.createServer((req, res) => {
   </div>
   <div class="card">
     <h3>Yhteydessä olevat koirapannat</h3>
-    <table><tr><th>ID</th><th>Protokolla</th><th>Koordinaatit</th><th>Nopeus</th><th>Akku</th><th>Viimeksi nähty</th></tr>${devRows || '<tr><td colspan="6" style="color:#8b949e">Ei pantoja vielä yhdistettynä.</td></tr>'}</table>
+    <table><tr><th>ID</th><th>Protokolla</th><th>Koordinaatit</th><th>Nopeus</th><th>Akku</th><th>Haukku</th><th>Viimeksi nähty</th></tr>${devRows || '<tr><td colspan="7" style="color:#8b949e">Ei pantoja vielä yhdistettynä.</td></tr>'}</table>
   </div>
   <div class="card">
     <h3>Reaaliaikainen loki</h3>
