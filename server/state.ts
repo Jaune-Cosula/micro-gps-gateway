@@ -102,8 +102,10 @@ class GatewayState {
         id,
         name: `Koirapanta ${id}`,
         protocol: 'ICAR_GT06',
-        lat: 60.85214,
-        lon: 25.68142,
+        // No known position yet: 0,0, not a fabricated coordinate. A bark before the first fix
+        // must not place the dog at an invented spot.
+        lat: 0,
+        lon: 0,
         speed: 0,
         battery: 88,
         heading: 0,

@@ -152,12 +152,15 @@ function recordBark(deviceId: string, source = 'IK122T GT06 0x13') {
 
   let dev = state.devices.get(deviceId);
   if (!dev) {
+    // No known position yet: start at 0,0 rather than a fabricated one. A bark that arrives
+    // before the collar's first fix must not place the dog at an invented coordinate - the
+    // app keeps showing the last real position, and until there is one it shows no position.
     dev = {
       id: deviceId,
       name: `Koirapanta ${deviceId}`,
-      lat: 60.85214,
-      lng: 25.68142,
-      lon: 25.68142,
+      lat: 0,
+      lng: 0,
+      lon: 0,
       speed: 0,
       battery: 90,
       heading: 0,
