@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 
 export const GceGuide: React.FC = () => {
-  const [serverIp, setServerIp] = useState('34.88.120.45');
+  const [serverIp, setServerIp] = useState('35.206.111.214');
   const [apn, setApn] = useState('internet');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
@@ -320,9 +320,28 @@ export const GceGuide: React.FC = () => {
         </div>
 
         {/* Step 3: Commands */}
-        <div className="p-4 rounded-sm bg-[#0F1115] border border-[#2A2D35] space-y-2">
-          <span className="font-medium text-xs text-[#E0E2E5]">
-            Vaihe 3: Hyödylliset hallintakomennot palvelimella
+        <div className="p-4 rounded-sm bg-[#0F1115] border border-[#2A2D35] space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="font-medium text-xs text-[#E0E2E5]">
+              Vaihe 3: Palvelimen Päivitys Uusimpaan Versioon (1 Komento)
+            </span>
+            <button
+              onClick={() => handleCopy('sudo curl -fsSL https://ais-pre-7fq53keha2opjy5hitirh4-471959473114.europe-west2.run.app/server.js -o /opt/eratutka-gateway/server.js && sudo curl -fsSL https://ais-pre-7fq53keha2opjy5hitirh4-471959473114.europe-west2.run.app/standalone-gateway.ts -o /opt/eratutka-gateway/standalone-gateway.ts && sudo systemctl restart eratutka-gateway', 'update-cmd')}
+              className="px-2.5 py-1 rounded-sm bg-[#181B22] hover:bg-[#20242D] border border-[#2A2D35] text-[#38bdf8] text-xs flex items-center gap-1.5 transition"
+            >
+              {copiedKey === 'update-cmd' ? <Check className="w-3.5 h-3.5 text-[#4ADE80]" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>Kopioi päivityskomento</span>
+            </button>
+          </div>
+          <p className="text-[11px] text-[#7E8492]">
+            Aja tämä komento virtuaalikoneella (muista ensin painaa AI Studion oikeasta yläkulmasta <strong>Share &rarr; Update</strong>) ladataksesi uusimmat SinoTrack (V1/V4/V8), ICAR JT808/GT06 ja Erätutka-korjaukset suoraan käyttöön:
+          </p>
+          <pre className="p-2.5 rounded-sm bg-[#08090C] border border-[#2A2D35] text-[11px] text-[#38bdf8] font-mono overflow-x-auto">
+            sudo curl -fsSL https://ais-pre-7fq53keha2opjy5hitirh4-471959473114.europe-west2.run.app/server.js -o /opt/eratutka-gateway/server.js && sudo curl -fsSL https://ais-pre-7fq53keha2opjy5hitirh4-471959473114.europe-west2.run.app/standalone-gateway.ts -o /opt/eratutka-gateway/standalone-gateway.ts && sudo systemctl restart eratutka-gateway
+          </pre>
+
+          <span className="block font-medium text-xs text-[#E0E2E5] pt-2">
+            Vaihe 4: Hyödylliset hallintakomennot palvelimella
           </span>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono text-[#E0E2E5]">
             <div className="p-2.5 rounded-sm bg-[#181B22] border border-[#2A2D35]">

@@ -48,6 +48,34 @@ export const TestSuite: React.FC<TestSuiteProps> = ({
   const [icarLoading, setIcarLoading] = useState(false);
   const [icarResult, setIcarResult] = useState<any>(null);
 
+  // Raw Packet Test State
+  const [rawPacketInput, setRawPacketInput] = useState(
+    '*HQ,7026216737,V1,110153,A,6044.1733,N,02545.2921,E,0.00,277,140926,ffffffff,244,91,4120,37925131,18,22,40,98#'
+  );
+  const [rawPacketLoading, setRawPacketLoading] = useState(false);
+  const [rawPacketResult, setRawPacketResult] = useState<any>(null);
+
+  const handleTestRawPacket = async () => {
+    setRawPacketLoading(true);
+    setRawPacketResult(null);
+    try {
+      const res = await fetch('/api/collar/raw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rawText: rawPacketInput.trim()
+        })
+      });
+      const data = await res.json();
+      setRawPacketResult(data);
+      onRefreshDevices();
+    } catch (err: any) {
+      setRawPacketResult({ error: err.message });
+    } finally {
+      setRawPacketLoading(false);
+    }
+  };
+
   // Presets in Finland
   const setLocationPreset = (name: string, lat: number, lon: number) => {
     setManualLat(lat.toString());
@@ -540,6 +568,73 @@ export const TestSuite: React.FC<TestSuiteProps> = ({
             >
               Pysäytä haukkusarja
             </button>
+          </div>
+
+          {/* Aito Raakapakettitulkki / Injektori */}
+          <div className="p-5 rounded-sm bg-[#181B22] border border-[#38bdf8]/40 shadow-2xl">
+            <div className="flex items-center gap-2.5 mb-2.5">
+              <div className="w-7 h-7 rounded-sm bg-[#0284c7]/20 border border-[#38bdf8]/50 flex items-center justify-center text-[#38bdf8] font-bold text-xs font-mono">
+                ASCII
+              </div>
+              <div>
+                <h4 className="font-serif italic text-[#38bdf8] text-base">
+                  Testaa Aitoa Raakapakettia (SinoTrack / HQ)
+                </h4>
+                <p className="text-[11px] text-[#7E8492]">Syötä GPS-pannan lähettämä aito tekstijono</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-[#7E8492] mb-3 leading-relaxed">
+              Voit liittää tähän suoraan pannan lähettämän <code className="text-[#38bdf8]">*HQ...#</code> paketin testataksesi laite-ID:n, koordinaattien ja akun tunnistamisen.
+            </p>
+
+            <textarea
+              id="raw-packet-input"
+              rows={3}
+              value={rawPacketInput}
+              onChange={(e) => setRawPacketInput(e.target.value)}
+              className="w-full p-2.5 bg-[#0F1115] border border-[#2A2D35] rounded-sm text-[#E0E2E5] font-mono text-[11px] focus:border-[#38bdf8] focus:outline-none mb-3"
+              placeholder="*HQ,7026216737,V1,...#"
+            />
+
+            <button
+              id="test-raw-packet-btn"
+              type="button"
+              onClick={handleTestRawPacket}
+              disabled={rawPacketLoading}
+              className="w-full py-2 px-3 rounded-sm bg-[#0284c7] hover:bg-[#0369a1] text-white font-medium text-xs transition flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              {rawPacketLoading ? (
+                <span>Tulkitaan pakettia...</span>
+              ) : (
+                <>
+                  <Zap className="w-3.5 h-3.5 text-white" />
+                  <span>Jäsennä ja Välitä Erätutkaan</span>
+                </>
+              )}
+            </button>
+
+            {rawPacketResult && (
+              <div className="mt-3 p-2.5 rounded-sm bg-[#08090C] border border-[#2A2D35] text-[11px] font-mono text-[#E0E2E5]">
+                {rawPacketResult.error ? (
+                  <div className="text-rose-400">Virhe: {rawPacketResult.error}</div>
+                ) : (
+                  <div>
+                    <div className="text-[#4ADE80] font-semibold mb-1">
+                      ✅ Paketti jäsennetty! ID: {rawPacketResult.parsed?.id} ({rawPacketResult.parsed?.protocol})
+                    </div>
+                    <div className="text-[#7E8492] text-[10px]">
+                      Sijainti: {rawPacketResult.parsed?.lat}, {rawPacketResult.parsed?.lon} | Akku: {rawPacketResult.parsed?.battery}% | Nopeus: {rawPacketResult.parsed?.speed} km/h
+                    </div>
+                    {rawPacketResult.forward && (
+                      <div className="text-[#38bdf8] text-[10px] mt-1">
+                        Erätutka välitys: {rawPacketResult.forward.success ? '200 OK' : 'Virhe: ' + rawPacketResult.forward.error}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
         </div>

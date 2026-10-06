@@ -74,6 +74,21 @@ export const MapView: React.FC<MapViewProps> = ({
     const map = mapInstanceRef.current;
     if (!map) return;
 
+    // Clean up markers and polylines for removed devices
+    const currentDeviceIds = new Set(devices.map((d) => d.id));
+    for (const [id, marker] of markersRef.current.entries()) {
+      if (!currentDeviceIds.has(id)) {
+        marker.remove();
+        markersRef.current.delete(id);
+      }
+    }
+    for (const [id, polyline] of polylinesRef.current.entries()) {
+      if (!currentDeviceIds.has(id)) {
+        polyline.remove();
+        polylinesRef.current.delete(id);
+      }
+    }
+
     devices.forEach((dev) => {
       const isSelected = selectedDevice?.id === dev.id;
       const isOnline = Date.now() - dev.lastSeen < 180000;

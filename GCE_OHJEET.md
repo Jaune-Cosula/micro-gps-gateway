@@ -130,7 +130,17 @@ Lähetä pannan numeroon:
 
 ---
 
-## 5. Hallinta ja lokit
+## 5. Päivittäminen uusimpaan versioon (1 Komento)
+
+Kun haluat päivittää palvelimen uusimpaan versioon (sisältää SinoTrack multi-packet ja portin 5023 automaattitunnistuksen):
+
+```bash
+sudo curl -fsSL https://ais-pre-7fq53keha2opjy5hitirh4-471959473114.europe-west2.run.app/standalone-gateway.ts -o /opt/eratutka-gateway/standalone-gateway.ts && sudo systemctl restart eratutka-gateway
+```
+
+---
+
+## 6. Hallinta ja lokit
 
 Voit tarkistaa palvelun tilan ja lokit milloin vain SSH-yhteyden kautta:
 

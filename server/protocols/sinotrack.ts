@@ -92,10 +92,10 @@ export function parseSinoTrackPacket(raw: string): GpsPosition | null {
     if (parts.length < 5) return null;
 
     const deviceId = parts[1];
-    const cmd = parts[2]; // V1, V4, NBR, LINK, etc.
+    const cmd = parts[2] || ''; // V1, V4, V8, NBR, LINK, etc.
 
-    // Position packet: *HQ,id,V1,time,A,lat,N,lon,E,speed,heading,date,status,battery#
-    if (cmd === 'V1' || cmd === 'V4' || cmd === 'NBR' || cmd === 'UD') {
+    // Position packet: *HQ,id,V1/V4/V8,time,A,lat,N,lon,E,speed,heading,date,status,mcc,mnc,lac,cellid,sats,gsm,..,battery#
+    if (cmd.startsWith('V') || cmd === 'NBR' || cmd === 'UD') {
       const timeStr = parts[3];
       const validFlag = parts[4]; // 'A' = valid, 'V' = void
       const latStr = parts[5];
@@ -106,13 +106,34 @@ export function parseSinoTrackPacket(raw: string): GpsPosition | null {
       const headingStr = parts[10];
       const dateStr = parts[11];
       
-      // Battery might be in part 13, or part 12
+      // Battery percentage parsing (ST-904 / ST-904L puts battery % as last parameter or part 13/12)
       let battery = 100;
-      if (parts.length > 13 && parts[13] !== '') {
+      const lastPart = parts[parts.length - 1];
+      if (lastPart) {
+        const lastBat = parseInt(lastPart, 10);
+        if (!isNaN(lastBat) && lastBat >= 0 && lastBat <= 100) {
+          battery = lastBat;
+        }
+      }
+      if (battery === 100 && parts.length > 13 && parts[13] !== '') {
         const parsedBat = parseInt(parts[13], 10);
-        if (!isNaN(parsedBat)) battery = Math.min(100, Math.max(0, parsedBat));
-      } else if (parts.length > 12 && parts[12] && !parts[12].startsWith('FF') && !isNaN(parseInt(parts[12], 10))) {
-        battery = parseInt(parts[12], 10);
+        // Avoid interpreting MCC (e.g. 244 for Finland) as battery
+        if (!isNaN(parsedBat) && parsedBat >= 0 && parsedBat <= 100) {
+          battery = parsedBat;
+        }
+      } else if (battery === 100 && parts.length > 12 && parts[12] && !parts[12].startsWith('FF') && !isNaN(parseInt(parts[12], 10))) {
+        const parsedBat = parseInt(parts[12], 10);
+        if (parsedBat >= 0 && parsedBat <= 100) {
+          battery = parsedBat;
+        }
+      }
+
+      let satellites = 9;
+      if (parts.length >= 18) {
+        const satVal = parseInt(parts[17], 10);
+        if (!isNaN(satVal) && satVal >= 0 && satVal <= 32) {
+          satellites = satVal;
+        }
       }
 
       const lat = convertNmeaToDecimal(latStr, latHem);
@@ -139,6 +160,7 @@ export function parseSinoTrackPacket(raw: string): GpsPosition | null {
         speed,
         battery,
         heading,
+        satellites,
         timestamp,
         protocol: 'SinoTrack',
         rawPacket: trimmed,

@@ -6,12 +6,67 @@
 import net from 'net';
 import { gatewayState } from './state';
 import { parseSinoTrackPacket } from './protocols/sinotrack';
-import { parseIcarData } from './protocols/icar';
+import { parseIcarData, extractIcarFrames } from './protocols/icar';
 
 export class GpsTcpServer {
   private sinotrackServer: net.Server | null = null;
   private icarServer: net.Server | null = null;
   private activeSocketsCount = 0;
+  private deviceSockets = new Map<string, net.Socket>();
+
+  public getActiveDeviceIds(): string[] {
+    return Array.from(this.deviceSockets.keys());
+  }
+
+  public isDeviceConnected(deviceId: string): boolean {
+    const sock = this.deviceSockets.get(String(deviceId));
+    return Boolean(sock && !sock.destroyed && sock.writable);
+  }
+
+  public sendCommand(deviceId: string, command: string): { success: boolean; error?: string; bytesSent?: number } {
+    const id = String(deviceId);
+    let sock = this.deviceSockets.get(id);
+
+    // If exact ID not found, check if single socket active or partial match
+    if (!sock && this.deviceSockets.size === 1) {
+      const [firstKey, firstSock] = Array.from(this.deviceSockets.entries())[0];
+      if (firstKey.includes(id) || id.includes(firstKey)) {
+        sock = firstSock;
+      }
+    }
+
+    if (!sock || sock.destroyed || !sock.writable) {
+      return {
+        success: false,
+        error: `Laite ${id} ei ole aktiivisessa TCP-yhteydessä (Aktiiviset: ${Array.from(this.deviceSockets.keys()).join(', ') || 'Ei kytkettyjä laitteita'})`
+      };
+    }
+
+    // Ensure proper formatting for collar
+    const formattedCmd = command.endsWith('\n') || command.endsWith('\r') ? command : `${command}\r\n`;
+    const buffer = Buffer.from(formattedCmd, 'ascii');
+
+    try {
+      sock.write(buffer);
+      gatewayState.addLog({
+        id: 'cmd-out-' + Date.now(),
+        timestamp: Date.now(),
+        type: 'tcp_in',
+        deviceId: id,
+        protocol: 'Downlink',
+        message: `📤 [KOMENTO LÄHETETTY] Laite: ${id} -> "${formattedCmd.trim()}" (${buffer.length} tavua)`
+      });
+      return {
+        success: true,
+        bytesSent: buffer.length
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: `Komennon lähetysvirhe: ${err.message}`
+      };
+    }
+  }
 
   public start() {
     this.startSinoTrackServer(gatewayState.config.sinotrackPort);
@@ -36,6 +91,7 @@ export class GpsTcpServer {
       this.activeSocketsCount++;
       gatewayState.metrics.activeSockets = this.activeSocketsCount;
       const remote = `${socket.remoteAddress}:${socket.remotePort}`;
+      let knownDeviceId: string | undefined = undefined;
 
       gatewayState.addLog({
         id: 'tcp-conn-' + Date.now(),
@@ -74,6 +130,8 @@ export class GpsTcpServer {
 
           const pos = parseSinoTrackPacket(trimmed);
           if (pos) {
+            knownDeviceId = pos.id;
+            this.deviceSockets.set(pos.id, socket);
             await gatewayState.handlePosition(pos, trimmed);
           } else if (trimmed.includes('LINK') || trimmed.includes('BP00')) {
             // Heartbeat packet
@@ -99,6 +157,9 @@ export class GpsTcpServer {
       });
 
       socket.on('close', () => {
+        if (knownDeviceId) {
+          this.deviceSockets.delete(knownDeviceId);
+        }
         this.activeSocketsCount = Math.max(0, this.activeSocketsCount - 1);
         gatewayState.metrics.activeSockets = this.activeSocketsCount;
       });
@@ -144,48 +205,57 @@ export class GpsTcpServer {
         message: `ICAR IK122T TCP-yhteys avattu: ${remote}`
       });
 
+      let bufferAcc = Buffer.alloc(0);
+
       socket.on('data', async (chunk) => {
-        const rawHex = chunk.toString('hex');
-        const rawAscii = chunk.toString('utf8');
+        bufferAcc = Buffer.concat([bufferAcc, chunk]);
+        const { frames, remainder } = extractIcarFrames(bufferAcc);
+        bufferAcc = remainder;
 
-        gatewayState.addLog({
-          id: 'pkt-icar-' + Date.now() + '-' + Math.random().toString(36).slice(2, 4),
-          timestamp: Date.now(),
-          type: 'tcp_in',
-          protocol: 'ICAR (5023)',
-          rawHex,
-          rawAscii: chunk[0] === 0x2a ? rawAscii : undefined,
-          message: `Saapuva ICAR IK122T paketti (${chunk.length} tavua): ${rawHex.slice(0, 60)}...`
-        });
+        for (const frame of frames) {
+          const rawHex = frame.toString('hex');
+          const rawAscii = frame.toString('utf8');
 
-        const result = parseIcarData(chunk, knownDeviceId);
-
-        if (result.deviceId) {
-          knownDeviceId = result.deviceId;
-        }
-
-        // If GT06 protocol expects an ACK response (e.g. 0x01 login or 0x13 heartbeat)
-        if (result.responseBuffer) {
-          socket.write(result.responseBuffer);
           gatewayState.addLog({
-            id: 'ack-' + Date.now(),
+            id: 'pkt-icar-' + Date.now() + '-' + Math.random().toString(36).slice(2, 4),
             timestamp: Date.now(),
-            type: 'login_ack',
-            protocol: 'ICAR IK122T',
-            deviceId: knownDeviceId,
-            message: `GT06 ACK Lähetetty laitteelle [Tyyppi: ${result.packetType}, Hex: ${result.responseBuffer.toString('hex')}]`
+            type: 'tcp_in',
+            protocol: 'ICAR (5023)',
+            rawHex,
+            rawAscii: frame[0] === 0x2a ? rawAscii : undefined,
+            message: `Saapuva ICAR IK122T kehys (${frame.length} tavua): ${rawHex.slice(0, 60)}...`
           });
-        }
 
-        // If barking was detected in 0x13/0x26/ASCII status packet
-        if (result.isBarking) {
-          const id = knownDeviceId || result.deviceId || 'IK122T_COLLAR';
-          await gatewayState.recordBark(id, Date.now(), result.alarmType || 'IK122T GT06 0x13');
-        }
+          const result = parseIcarData(frame, knownDeviceId);
 
-        // If location was parsed, forward to Erätutka
-        if (result.position) {
-          await gatewayState.handlePosition(result.position, rawHex);
+          if (result.deviceId) {
+            knownDeviceId = result.deviceId;
+            this.deviceSockets.set(result.deviceId, socket);
+          }
+
+          // If GT06 protocol expects an ACK response (e.g. 0x01 login or 0x13 heartbeat)
+          if (result.responseBuffer) {
+            socket.write(result.responseBuffer);
+            gatewayState.addLog({
+              id: 'ack-' + Date.now(),
+              timestamp: Date.now(),
+              type: 'login_ack',
+              protocol: 'ICAR IK122T',
+              deviceId: knownDeviceId,
+              message: `GT06 ACK Lähetetty laitteelle [Tyyppi: ${result.packetType}, Hex: ${result.responseBuffer.toString('hex')}]`
+            });
+          }
+
+          // If barking was detected in 0x13/0x26/ASCII status packet
+          if (result.isBarking) {
+            const id = knownDeviceId || result.deviceId || 'IK122T_COLLAR';
+            await gatewayState.recordBark(id, Date.now(), result.alarmType || 'IK122T GT06 0x13');
+          }
+
+          // If location was parsed, forward to Erätutka
+          if (result.position) {
+            await gatewayState.handlePosition(result.position, rawHex);
+          }
         }
       });
 
@@ -200,6 +270,9 @@ export class GpsTcpServer {
       });
 
       socket.on('close', () => {
+        if (knownDeviceId) {
+          this.deviceSockets.delete(knownDeviceId);
+        }
         this.activeSocketsCount = Math.max(0, this.activeSocketsCount - 1);
         gatewayState.metrics.activeSockets = this.activeSocketsCount;
       });

@@ -54,15 +54,13 @@ export default function App() {
       if (statusRes.activeSimulations) setIsSimulating(statusRes.activeSimulations.length > 0);
       if (devRes.devices) {
         setDevices(devRes.devices);
-        if (!selectedDevice && devRes.devices.length > 0) {
-          setSelectedDevice(devRes.devices[0]);
-        }
+        setSelectedDevice((prev) => prev || (devRes.devices.length > 0 ? devRes.devices[0] : null));
       }
       if (logsRes.logs) setLogs(logsRes.logs);
     } catch {
       // Fallback
     }
-  }, [selectedDevice]);
+  }, []);
 
   // Connect SSE Stream for real-time live events
   useEffect(() => {

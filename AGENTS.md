@@ -67,9 +67,11 @@ Gateway tukee ensisijaisesti **PULL-mallia**, jossa Erätutka (tai muu karttasov
 
 ### Pakolliset PULL-rajapinnat (Portti 8080):
 1. **`GET /api/positions` & `GET /api/devices`**:
-   - Palauttaa JSON-muodossa kaikkien aktiivisten laitteiden reaaliaikaiset tiedot (`id`, `lat`, `lon`, `speed`, `battery`, `heading`, `timestamp`, `isBarking`, `barkRate`).
+   - Palauttaa JSON-muodossa kaikkien aktiivisten laitteiden reaaliaikaiset tiedot (`id`, `name`, `lat`, `lng`, `lon`, `speed`, `battery`, `heading`, `timestamp`, `isBarking`, `barkRate`, `satellites`).
 2. **`GET /api/history` & `GET /api/history/:id` / `GET /api/tracks`**:
-   - Palauttaa pannan kulkeman GPS-jäljen (points-taulukko).
+   - Palauttaa pannan kulkeman GPS-jäljen in-memory -puskurista (max 3 600 pistettä per laite ~ 6-12h).
+   - Tukee query-parametreja: `id`, `since` (aikaleima ms), `hours` (oletus 6h), `limit` (oletus 2000).
+   - Palauttaa JSON-muodon: `{ "success": true, "deviceId": "...", "count": N, "points": [...] }`.
 3. **Pakolliset CORS-otsikot kaikissa HTTP-vastauksissa**:
    ```javascript
    res.setHeader('Access-Control-Allow-Origin', '*');
@@ -77,4 +79,18 @@ Gateway tukee ensisijaisesti **PULL-mallia**, jossa Erätutka (tai muu karttasov
    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
    ```
    (CORS on välttämätön, jotta selaimessa pyörivä Erätutka-sovellus voi hakea tiedot suoraan ilman selainestoja).
+
+---
+
+## 5. JT808 TCP Stream Framing & Vahvistettu laitekonfiguraatio
+
+1. **TCP Virran puskurointi (Framing)**:
+   - JT808-paketit alkavat ja loppuvat tavuun `0x7e`.
+   - Koska TCP saattaa pilkkoa paketit useampaan `data`-tapahtumaan, palvelimen on aina puskuroitava saapuva data (`bufAcc = Buffer.concat([bufAcc, chunk])`) ja eroteltava täydet paketit (`bufAcc.indexOf(0x7e, 1)`).
+2. **Tuotantotestattu laite**:
+   - Panta: ICAR IK122T / IK122T Pro
+   - Testattu laite-ID: `89067647125`
+   - Lähetysväli: 10s välein aktiivitilassa
+   - GCE Palvelimen IP: `35.206.111.214`
+   - Portit: 5023 (JT808/GT06 TCP), 8080 (REST API / Dashboard)
 

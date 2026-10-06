@@ -317,8 +317,9 @@ class GatewayState {
       }
 
       // Update device lastForwardStatus
-      if (existing) {
-        existing.lastForwardStatus = {
+      const devRecord = this.devices.get(position.id);
+      if (devRecord) {
+        devRecord.lastForwardStatus = {
           success: forwardResult.success,
           timestamp: Date.now(),
           status: forwardResult.status,

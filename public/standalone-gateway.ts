@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
  * Standalone Ultra-Lightweight GPS Gateway for Linux / GCE e2-micro
- * Uses pure Node.js built-in modules (net, http, https, fs, url) with ZERO external dependencies!
+ * Uses pure Node.js built-in modules (net, http, https) with ZERO external dependencies!
  * Total RAM usage: ~15-25 MB.
  *
  * Runs TCP listeners for:
- *   - SinoTrack ST-904L: Port 5013 (ASCII *HQ,V1/V4/V8/NBR/UD...# + Binary fallback)
- *   - ICAR IK122T / Pro: Port 5023 (JT808 0x7E + GT06 0x78 0x78 + SinoTrack ASCII fallback)
- *   - Web Status & API:  Port 8080 (or PORT env)
+ *   - SinoTrack ST-904L: Port 5013
+ *   - ICAR IK122T:       Port 5023
+ *   - Web Status UI:     Port 8080 (or PORT env)
  */
 
 import net from 'net';
@@ -30,27 +30,6 @@ const CONFIG = {
   RAW_LOG_PATH: process.env.RAW_LOG_PATH || '/opt/eratutka-gateway/raw_packets.log'
 };
 
-interface RawPacketEntry {
-  time: string;
-  isoTime: string;
-  timestamp: number;
-  devId?: string;
-  protocol: string;
-  msgId?: string;
-  serial?: number;
-  alarmFlag?: string;
-  statusFlag?: string;
-  lat?: number;
-  lon?: number;
-  speed?: number;
-  battery?: number;
-  extraHex?: string;
-  parsedExtras?: Array<{ id: string; len: number; hex: string }>;
-  rawHex: string;
-  text?: string;
-  note?: string;
-}
-
 // --------------------------------------------------------------------------
 // In-Memory State & Metrics
 // --------------------------------------------------------------------------
@@ -64,38 +43,8 @@ const state = {
   devices: new Map<string, any>(),
   history: new Map<string, any[]>(),
   barkTimestamps: new Map<string, number[]>(),
-  rawPackets: [] as RawPacketEntry[],
   recentLogs: [] as Array<{ time: string; msg: string; type: string }>
 };
-
-function formatTimeFi(d = new Date()): string {
-  return d.toISOString().substring(11, 19).replace(/:/g, '.');
-}
-
-function recordRawPacket(entry: Omit<RawPacketEntry, 'time' | 'isoTime' | 'timestamp'>) {
-  const now = new Date();
-  const fullEntry: RawPacketEntry = {
-    time: formatTimeFi(now),
-    isoTime: now.toISOString(),
-    timestamp: now.getTime(),
-    ...entry
-  };
-  state.rawPackets.unshift(fullEntry);
-  if (state.rawPackets.length > 300) {
-    state.rawPackets.pop();
-  }
-  try {
-    fs.appendFileSync(CONFIG.RAW_LOG_PATH, JSON.stringify(fullEntry) + '\n');
-  } catch {}
-}
-
-function log(msg: string, type: 'info' | 'pkt' | 'fwd' | 'err' = 'info') {
-  const time = new Date().toISOString().substring(11, 19);
-  const entry = { time, msg, type };
-  state.recentLogs.push(entry);
-  if (state.recentLogs.length > 200) state.recentLogs.shift();
-  console.log(`[${time}] [${type.toUpperCase()}] ${msg}`);
-}
 
 function sendDownlinkCommand(deviceId: string, rawCommand: string): { success: boolean; error?: string; bytesSent?: number } {
   const id = String(deviceId);
@@ -154,26 +103,18 @@ function recordBark(deviceId: string, source = 'IK122T GT06 0x13') {
   if (!dev) {
     dev = {
       id: deviceId,
-      name: `Koirapanta ${deviceId}`,
       lat: 60.85214,
-      lng: 25.68142,
       lon: 25.68142,
       speed: 0,
-      battery: 90,
+      battery: 88,
       heading: 0,
-      satellites: 12,
-      protocol: 'ICAR_JT808',
-      timestamp: now,
+      protocol: 'ICAR_GT06',
       lastSeen: now
     };
   }
 
   dev.isBarking = true;
-  dev.barking = true;
   dev.barkRate = barkRate;
-  dev.bark = barkRate;
-  dev.barks = barkRate;
-  dev.alarm = 'bark';
   dev.lastBarkTime = now;
   dev.totalBarks = (dev.totalBarks || 0) + 1;
   dev.lastSeen = now;
@@ -183,21 +124,32 @@ function recordBark(deviceId: string, source = 'IK122T GT06 0x13') {
   forwardGps({ ...dev, timestamp: now });
 }
 
-// Bark decay check (10s decay)
+// Bark decay check
 setInterval(() => {
   const now = Date.now();
   for (const [id, dev] of state.devices.entries()) {
     if (dev.isBarking && now - (dev.lastBarkTime || 0) > 10000) {
       dev.isBarking = false;
-      dev.barking = false;
       dev.barkRate = 0;
-      dev.bark = 0;
-      dev.barks = 0;
-      dev.alarm = 'none';
       state.barkTimestamps.set(id, []);
     }
   }
 }, 2000);
+
+function log(msg: string, type: 'info' | 'pkt' | 'fwd' | 'err' = 'info') {
+  const time = new Date().toISOString().substring(11, 19);
+  const dateStr = new Date().toISOString().split('T')[0];
+  const entry = { time, msg, type };
+  state.recentLogs.push(entry);
+  if (state.recentLogs.length > 200) state.recentLogs.shift();
+  console.log(`[${time}] [${type.toUpperCase()}] ${msg}`);
+
+  // Also append to raw_packets.log file if possible
+  try {
+    const line = `[${dateStr} ${time}] [${type.toUpperCase()}] ${msg}\n`;
+    fs.appendFileSync(CONFIG.RAW_LOG_PATH, line);
+  } catch {}
+}
 
 // --------------------------------------------------------------------------
 // CRC-16 for GT06 / ICAR
@@ -350,56 +302,11 @@ function appendHistory(deviceId: string, point: any) {
     battery: point.battery || 100,
     heading: point.heading || 0,
     barkRate: point.barkRate || 0,
-    bark: point.barkRate || 0,
-    barks: point.barkRate || 0,
-    isBarking: Boolean(point.isBarking),
-    barking: Boolean(point.isBarking),
-    alarm: point.isBarking ? 'bark' : 'none',
-    satellites: point.satellites || 12,
+    isBarking: point.isBarking || false,
     timestamp: point.timestamp || Date.now()
   });
   if (list.length > 3600) list.shift();
   state.history.set(deviceId, list);
-}
-
-function upsertDevice(point: {
-  id: string;
-  lat: number;
-  lon: number;
-  speed: number;
-  battery: number;
-  heading: number;
-  satellites?: number;
-  protocol: string;
-  timestamp: number;
-  isBarking: boolean;
-  barkRate: number;
-}) {
-  const existing = state.devices.get(point.id);
-  const now = Date.now();
-  const devObj = {
-    id: point.id,
-    name: existing?.name || `Koirapanta ${point.id}`,
-    lat: point.lat,
-    lng: point.lon,
-    lon: point.lon,
-    speed: point.speed,
-    battery: point.battery,
-    heading: point.heading,
-    barkRate: point.barkRate,
-    bark: point.barkRate,
-    barks: point.barkRate,
-    isBarking: point.isBarking,
-    barking: point.isBarking,
-    alarm: point.isBarking ? 'bark' : 'none',
-    satellites: point.satellites ?? existing?.satellites ?? 12,
-    timestamp: point.timestamp || now,
-    lastSeen: now,
-    lastBarkTime: point.isBarking ? now : existing?.lastBarkTime || 0,
-    protocol: point.protocol
-  };
-  state.devices.set(point.id, devObj);
-  appendHistory(point.id, devObj);
 }
 
 function handleSinoTrack(raw: string, socket?: net.Socket, knownIdRef?: { id?: string }) {
@@ -411,37 +318,23 @@ function handleSinoTrack(raw: string, socket?: net.Socket, knownIdRef?: { id?: s
 }
 
 function processSingleSinoTrackPacket(raw: string, socket?: net.Socket, knownIdRef?: { id?: string }) {
-  const trimmed = raw.trim();
-  if (!trimmed) return;
-
-  const rawHex = Buffer.from(trimmed, 'utf8').toString('hex').toUpperCase();
-  const clean = trimmed.replace(/^[*]/, '').replace(/[#]$/, '');
+  const clean = raw.trim().replace(/^[*]/, '').replace(/[#]$/, '');
   const parts = clean.split(',');
+  if (parts.length < 5) return;
 
-  if (parts.length < 3) {
-    recordRawPacket({
-      protocol: 'SINOTRACK_ASCII',
-      rawHex,
-      text: trimmed,
-      note: 'Tuntematon ASCII-paketti'
-    });
-    return;
-  }
+  const id = parts[1];
+  if (!id) return;
+  if (knownIdRef) knownIdRef.id = id;
+  if (socket) state.socketMap.set(id, socket);
 
-  const id = parts[1] || knownIdRef?.id || 'SINOTRACK';
-  if (knownIdRef && parts[1]) knownIdRef.id = parts[1];
-  if (socket && id) state.socketMap.set(id, socket);
-
-  const cmd = parts[2] || '';
-  // Support V1, V4, V8, and all V* location reports as well as NBR / UD
-  if ((cmd.startsWith('V') || cmd === 'NBR' || cmd === 'UD') && parts.length >= 9) {
-    const validFlag = parts[4]; // 'A' = valid GPS fix, 'V' = last known / LBS
+  const cmd = parts[2];
+  if (cmd === 'V1' || cmd === 'V4' || cmd === 'NBR' || cmd === 'UD') {
     const lat = parseNmeaCoord(parts[5], parts[6]);
     const lon = parseNmeaCoord(parts[7], parts[8]);
     const speed = parseFloat(parts[9] || '0') || 0;
     const heading = parseInt(parts[10] || '0', 10) || 0;
 
-    // ST-904L puts battery % as the last parameter before # (e.g. ...,14,20,40,98#)
+    // Check battery % properly (ST-904L puts battery as last parameter before #)
     let battery = 100;
     const lastPart = parts[parts.length - 1];
     if (lastPart) {
@@ -454,33 +347,12 @@ function processSingleSinoTrackPacket(raw: string, socket?: net.Socket, knownIdR
       for (let i = parts.length - 1; i >= 12; i--) {
         const val = parseInt(parts[i], 10);
         // Avoid MCC e.g. 244
-        if (!isNaN(val) && val >= 0 && val <= 100 && !parts[i].toUpperCase().startsWith('FF')) {
+        if (!isNaN(val) && val >= 0 && val <= 100 && !parts[i].startsWith('FF')) {
           battery = val;
           break;
         }
       }
     }
-
-    let satellites = 12;
-    if (parts.length >= 18) {
-      const satVal = parseInt(parts[17], 10);
-      if (!isNaN(satVal) && satVal >= 0 && satVal <= 32) {
-        satellites = satVal;
-      }
-    }
-
-    recordRawPacket({
-      devId: id,
-      protocol: 'SINOTRACK_ASCII',
-      msgId: cmd,
-      lat,
-      lon,
-      speed: Number(speed.toFixed(1)),
-      battery,
-      rawHex,
-      text: trimmed,
-      note: `Sijainti (${lat}, ${lon}) [${validFlag}] Akku: ${battery}%`
-    });
 
     if (lat !== 0 || lon !== 0) {
       const existing = state.devices.get(id);
@@ -493,25 +365,15 @@ function processSingleSinoTrackPacket(raw: string, socket?: net.Socket, knownIdR
         speed: Number(speed.toFixed(1)),
         battery,
         heading,
-        satellites,
-        protocol: 'SinoTrack',
         timestamp: Date.now(),
         isBarking,
         barkRate
       };
-      upsertDevice(point);
-      log(`SinoTrack (${cmd}) ID:${id} Lat:${lat} Lon:${lon} ${speed}km/h Akku:${battery}%`, 'pkt');
+      state.devices.set(id, { ...point, lastSeen: Date.now(), protocol: 'SinoTrack' });
+      appendHistory(id, point);
+      log(`SinoTrack ID:${id} Lat:${lat} Lon:${lon} ${speed}km/h Akku:${battery}%`, 'pkt');
       forwardGps(point);
     }
-  } else {
-    recordRawPacket({
-      devId: id,
-      protocol: 'SINOTRACK_ASCII',
-      msgId: cmd || 'ASCII',
-      rawHex,
-      text: trimmed,
-      note: `SinoTrack viesti (${cmd || 'Keep-Alive'})`
-    });
   }
 }
 
@@ -674,7 +536,6 @@ function extractIcarFrames(streamBuffer: Buffer): { frames: Buffer[]; remainder:
 
 function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }) {
   state.packetsReceived++;
-  const rawHex = buf.toString('hex').toUpperCase();
 
   // 0. SinoTrack ASCII Protocol fallback on port 5023
   if (buf[0] === 0x2a || buf[0] === 0x5b || buf[0] === 0x28) {
@@ -689,7 +550,6 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
       const unescaped = unescapeJt808(buf);
       if (unescaped.length >= 12 && unescaped[0] === 0x7e) {
         const msgId = unescaped.readUInt16BE(1);
-        const msgIdHex = '0x' + msgId.toString(16).toUpperCase().padStart(4, '0');
         const phoneBcd = unescaped.subarray(5, 11);
         let phoneStr = '';
         for (let i = 5; i < 11; i++) {
@@ -705,14 +565,6 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
         if (msgId === 0x0100) {
           const resp = buildJt808Response(0x8100, phoneBcd, serial, 0x0100, 0, 'AUTH_OK');
           socket.write(resp);
-          recordRawPacket({
-            devId,
-            protocol: 'JT808',
-            msgId: msgIdHex,
-            serial,
-            rawHex,
-            note: 'Rekisterointi OK'
-          });
           log(`✅ [JT808 REGISTER OK] ID: ${devId}, Serial: ${serial}`, 'pkt');
           return;
         }
@@ -721,14 +573,6 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
         if (msgId === 0x0102) {
           const resp = buildJt808Response(0x8001, phoneBcd, serial, 0x0102, 0);
           socket.write(resp);
-          recordRawPacket({
-            devId,
-            protocol: 'JT808',
-            msgId: msgIdHex,
-            serial,
-            rawHex,
-            note: 'Auth'
-          });
           log(`✅ [JT808 AUTH OK] ID: ${devId}`, 'pkt');
           return;
         }
@@ -737,14 +581,6 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
         if (msgId === 0x0002) {
           const resp = buildJt808Response(0x8001, phoneBcd, serial, 0x0002, 0);
           socket.write(resp);
-          recordRawPacket({
-            devId,
-            protocol: 'JT808',
-            msgId: msgIdHex,
-            serial,
-            rawHex,
-            note: 'Heartbeat'
-          });
           log(`JT808 Heartbeat ID: ${devId}`, 'pkt');
           return;
         }
@@ -768,48 +604,7 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
           if ((statusFlag & 0x04) !== 0 && lat > 0) lat = -lat;
           if ((statusFlag & 0x08) !== 0 && lon > 0) lon = -lon;
 
-          // Parse JT808 Extra TLV fields (starts at byte 41 up to unescaped.length - 2)
-          const extraSlice = unescaped.subarray(41, unescaped.length - 2);
-          const extraHex = extraSlice.toString('hex').toUpperCase();
-          const parsedExtras: Array<{ id: string; len: number; hex: string }> = [];
-          let battery = state.devices.get(devId)?.battery ?? 90;
-          let satellites = 12;
-
-          let posIdx = 0;
-          while (posIdx + 2 <= extraSlice.length) {
-            const eId = extraSlice[posIdx];
-            const eLen = extraSlice[posIdx + 1];
-            if (posIdx + 2 + eLen > extraSlice.length) break;
-            const eVal = extraSlice.subarray(posIdx + 2, posIdx + 2 + eLen);
-            parsedExtras.push({
-              id: '0x' + eId.toString(16).toUpperCase().padStart(2, '0'),
-              len: eLen,
-              hex: eVal.toString('hex').toUpperCase()
-            });
-
-            // 0xE4: Battery percentage (2 bytes UInt16BE, e.g. 0x0060 = 96%)
-            if (eId === 0xe4 && eLen >= 2) {
-              const batVal = eVal.readUInt16BE(0);
-              if (batVal >= 0 && batVal <= 100) battery = batVal;
-            }
-            // 0x31: GNSS satellite count (1 byte)
-            if (eId === 0x31 && eLen >= 1) {
-              satellites = eVal[0];
-            }
-            posIdx += 2 + eLen;
-          }
-
-          // IK122T Pro does not raise any alarmFlag bit for a bark: it sends a position-less
-          // 0x0200 report carrying a vendor TLV item 0xE1 (28 bytes). Over this collar's whole
-          // packet log 0xE1 was present in every bark and absent from every normal report, so it
-          // is the reliable signal - the alarm-bit test alone never fires for it. The alarm bits
-          // are kept for other collar models that do use them.
-          const hasBarkTlv = parsedExtras.some((x) => x.id === '0xE1');
-          const isBark =
-            hasBarkTlv ||
-            (alarmFlag & 0x01) !== 0 ||
-            (alarmFlag & 0x08) !== 0 ||
-            (alarmFlag & 0x10) !== 0;
+          const isBark = (alarmFlag & 0x01) !== 0 || (alarmFlag & 0x08) !== 0 || (alarmFlag & 0x10) !== 0;
 
           if (isBark) {
             recordBark(devId, 'JT808 Hälytys');
@@ -819,64 +614,28 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
           const barkingState = Boolean(existing?.isBarking && Date.now() - (existing.lastBarkTime || 0) <= 10000);
           const barkRate = barkingState ? existing.barkRate || 0 : 0;
 
-          const alarmFlagHex = '0x' + alarmFlag.toString(16).toUpperCase().padStart(8, '0');
-          const statusFlagHex = '0x' + statusFlag.toString(16).toUpperCase().padStart(8, '0');
-
-          recordRawPacket({
-            devId,
-            protocol: 'JT808',
-            msgId: msgIdHex,
-            serial,
-            alarmFlag: alarmFlagHex,
-            statusFlag: statusFlagHex,
+          const point = {
+            id: devId,
             lat,
             lon,
             speed,
-            battery,
-            extraHex,
-            parsedExtras,
-            rawHex,
-            note: `Sijainti (${lat}, ${lon})${isBark ? ' [HALYTYS/HAUKKU!]' : ''}`
-          });
+            battery: 90,
+            heading,
+            timestamp: Date.now(),
+            isBarking: barkingState,
+            barkRate
+          };
 
-          // If valid coordinates (or retain last known coords if 0,0)
-          const finalLat = lat !== 0 ? lat : existing?.lat || 0;
-          const finalLon = lon !== 0 ? lon : existing?.lon || 0;
-
-          if (finalLat !== 0 || finalLon !== 0) {
-            const point = {
-              id: devId,
-              lat: finalLat,
-              lon: finalLon,
-              speed,
-              battery,
-              heading,
-              satellites,
-              protocol: 'ICAR_JT808',
-              timestamp: Date.now(),
-              isBarking: barkingState,
-              barkRate
-            };
-            upsertDevice(point);
-            log(`📍 [JT808 GPS] ID:${devId} Lat:${finalLat} Lon:${finalLon} ${speed}km/h Akku:${battery}%`, 'pkt');
-            if (lat !== 0 || lon !== 0) {
-              forwardGps(point);
-            }
-          }
+          state.devices.set(devId, { ...point, lastSeen: Date.now(), protocol: 'ICAR_JT808' });
+          appendHistory(devId, point);
+          log(`📍 [JT808 GPS] ID:${devId} Lat:${lat} Lon:${lon} ${speed}km/h`, 'pkt');
+          forwardGps(point);
           return;
         }
 
         // Generic fallback ACK
         const genResp = buildJt808Response(0x8001, phoneBcd, serial, msgId, 0);
         socket.write(genResp);
-        recordRawPacket({
-          devId,
-          protocol: 'JT808',
-          msgId: msgIdHex,
-          serial,
-          rawHex,
-          note: `Muu / Uusi viestityyppi (${msgIdHex})`
-        });
         return;
       }
     } catch {
@@ -888,7 +647,6 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
   if (buf.length >= 6 && buf[0] === 0x78 && buf[1] === 0x78) {
     const length = buf[2];
     const protocol = buf[3];
-    const protoHex = '0x' + protocol.toString(16).toUpperCase().padStart(2, '0');
 
     // Login (0x01)
     if (protocol === 0x01 && buf.length >= 10) {
@@ -902,14 +660,6 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
       const serial = buf.readUInt16BE(12);
       const ack = buildGt06Ack(0x01, serial);
       socket.write(ack);
-      recordRawPacket({
-        devId: imei,
-        protocol: 'GT06',
-        msgId: protoHex,
-        serial,
-        rawHex,
-        note: 'GT06 Login OK'
-      });
       log(`ICAR Login kuitattu ID: ${imei}`, 'pkt');
       return;
     }
@@ -927,18 +677,10 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
       const id = knownIdRef.id || 'IK122T_DOG';
       state.socketMap.set(id, socket);
 
+      // Check vibration alarm in terminal info byte (byte 4) or alarm byte (byte 7)
       const termInfo = buf[4];
       const alarmCode = buf.length > 7 ? buf[7] : 0;
       const isVibrationOrBark = ((termInfo & 0x38) === 0x08) || [0x01, 0x03, 0x09, 0x0a, 0x11].includes(alarmCode);
-
-      recordRawPacket({
-        devId: id,
-        protocol: 'GT06',
-        msgId: protoHex,
-        serial,
-        rawHex,
-        note: isVibrationOrBark ? 'GT06 Heartbeat [HALYTYS/HAUKKU!]' : 'GT06 Heartbeat'
-      });
 
       if (isVibrationOrBark) {
         recordBark(id, 'GT06 0x13 Status/Vibration Alarm');
@@ -981,17 +723,6 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
       const isBarking = Boolean(existing?.isBarking && Date.now() - (existing.lastBarkTime || 0) <= 10000);
       const barkRate = isBarking ? existing.barkRate || 0 : 0;
 
-      recordRawPacket({
-        devId: id,
-        protocol: 'GT06',
-        msgId: protoHex,
-        lat,
-        lon,
-        speed,
-        rawHex,
-        note: `GT06 Sijainti (${lat}, ${lon})`
-      });
-
       const point = {
         id,
         lat,
@@ -999,122 +730,17 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
         speed,
         battery: 88,
         heading,
-        satellites: 10,
-        protocol: 'ICAR_GT06',
         timestamp: Date.now(),
         isBarking,
         barkRate
       };
-      upsertDevice(point);
+      state.devices.set(id, { ...point, lastSeen: Date.now(), protocol: 'ICAR' });
+      appendHistory(id, point);
       log(`ICAR GT06 ID:${id} Lat:${lat} Lon:${lon} ${speed}km/h`, 'pkt');
       forwardGps(point);
     }
   }
 }
-
-// --------------------------------------------------------------------------
-// Startup Hydration from raw_packets.log (Preserves state across restarts)
-// --------------------------------------------------------------------------
-function hydrateFromLogFile() {
-  try {
-    if (!fs.existsSync(CONFIG.RAW_LOG_PATH)) return;
-    const stat = fs.statSync(CONFIG.RAW_LOG_PATH);
-    const readSize = Math.min(stat.size, 256 * 1024); // Read last 256 KB
-    const fd = fs.openSync(CONFIG.RAW_LOG_PATH, 'r');
-    const buf = Buffer.alloc(readSize);
-    fs.readSync(fd, buf, 0, readSize, stat.size - readSize);
-    fs.closeSync(fd);
-
-    const lines = buf.toString('utf8').split('\n').filter(Boolean);
-    // Skip first potentially partial line if we seeked into the file
-    const validLines = stat.size > readSize ? lines.slice(1) : lines;
-    const recentSlice = validLines.slice(-300);
-
-    for (const line of recentSlice) {
-      try {
-        const entry = JSON.parse(line) as RawPacketEntry;
-        if (entry.protocol === 'SINOTRACK_ASCII' && entry.text) {
-          const clean = entry.text.trim().replace(/^[*]/, '').replace(/[#]$/, '');
-          const parts = clean.split(',');
-          const cmd = parts[2] || '';
-          if (parts.length >= 9 && (cmd.startsWith('V') || cmd === 'NBR' || cmd === 'UD')) {
-            const id = parts[1];
-            const validFlag = parts[4];
-            const lat = parseNmeaCoord(parts[5], parts[6]);
-            const lon = parseNmeaCoord(parts[7], parts[8]);
-            const speed = parseFloat(parts[9] || '0') || 0;
-            const heading = parseInt(parts[10] || '0', 10) || 0;
-            let battery = 100;
-            const lastBat = parseInt(parts[parts.length - 1], 10);
-            if (!isNaN(lastBat) && lastBat >= 0 && lastBat <= 100) battery = lastBat;
-            let satellites = 12;
-            if (parts.length >= 18) {
-              const satVal = parseInt(parts[17], 10);
-              if (!isNaN(satVal) && satVal >= 0 && satVal <= 32) satellites = satVal;
-            }
-            entry.devId = id;
-            entry.msgId = cmd;
-            entry.lat = lat;
-            entry.lon = lon;
-            entry.speed = Number(speed.toFixed(1));
-            entry.battery = battery;
-            entry.note = `Sijainti (${lat}, ${lon}) [${validFlag}] Akku: ${battery}%`;
-            if (id && (lat !== 0 || lon !== 0)) {
-              upsertDevice({
-                id,
-                lat,
-                lon,
-                speed: Number(speed.toFixed(1)),
-                battery,
-                heading,
-                satellites,
-                protocol: 'SinoTrack',
-                timestamp: entry.timestamp || Date.now(),
-                isBarking: false,
-                barkRate: 0
-              });
-            }
-          }
-        } else if (entry.devId && entry.lat && entry.lon && (entry.lat !== 0 || entry.lon !== 0)) {
-          let battery = entry.battery ?? 90;
-          let satellites = 12;
-          if (entry.parsedExtras) {
-            for (const ex of entry.parsedExtras) {
-              if (ex.id === '0xE4' && ex.hex.length >= 4) {
-                const bVal = parseInt(ex.hex, 16);
-                if (!isNaN(bVal) && bVal >= 0 && bVal <= 100) battery = bVal;
-              }
-              if (ex.id === '0x31' && ex.hex.length >= 2) {
-                const sVal = parseInt(ex.hex, 16);
-                if (!isNaN(sVal)) satellites = sVal;
-              }
-            }
-          }
-          upsertDevice({
-            id: entry.devId,
-            lat: entry.lat,
-            lon: entry.lon,
-            speed: entry.speed || 0,
-            battery,
-            heading: 0,
-            satellites,
-            protocol: entry.protocol === 'JT808' ? 'ICAR_JT808' : entry.protocol,
-            timestamp: entry.timestamp || Date.now(),
-            isBarking: false,
-            barkRate: 0
-          });
-        }
-        state.rawPackets.unshift(entry);
-      } catch {}
-    }
-    if (state.rawPackets.length > 300) {
-      state.rawPackets.length = 300;
-    }
-    log(`Ladattu ${state.rawPackets.length} aiempaa pakettia ja ${state.devices.size} laitetta lokitiedostosta.`);
-  } catch {}
-}
-
-hydrateFromLogFile();
 
 // --------------------------------------------------------------------------
 // Start TCP Servers
@@ -1125,6 +751,7 @@ const sinoServer = net.createServer((sock) => {
   let bufferAcc = Buffer.alloc(0);
 
   sock.on('data', (d) => {
+    // If binary packet (JT808 0x7e or GT06 0x78 0x78 or 0x79 0x79)
     if (d[0] === 0x7e || (d[0] === 0x78 && d[1] === 0x78) || (d[0] === 0x79 && d[1] === 0x79)) {
       bufferAcc = Buffer.concat([bufferAcc, d]);
       const { frames, remainder } = extractIcarFrames(bufferAcc);
@@ -1175,14 +802,14 @@ const icarServer = net.createServer((sock) => {
   });
 });
 icarServer.listen(CONFIG.ICAR_PORT, '0.0.0.0', () => {
-  log(`ICAR JT808/GT06 TCP kuuntelee portissa ${CONFIG.ICAR_PORT}`);
+  log(`ICAR GT06 TCP kuuntelee portissa ${CONFIG.ICAR_PORT}`);
 });
 
 // --------------------------------------------------------------------------
-// Lightweight HTTP Status, RawLog & Command Server (Port 8080)
+// Lightweight HTTP Status & Command Server (Port 8080)
 // --------------------------------------------------------------------------
 const httpServer = http.createServer((req, res) => {
-  // Mandatory CORS Headers for all responses (Rule 4)
+  // CORS Headers for all requests
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
@@ -1201,50 +828,55 @@ const httpServer = http.createServer((req, res) => {
     return res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
   }
 
-  // 2. Real-time Devices & Positions (PULL API - returns direct array like live GCE server)
+  // 2. Status & Metrics
+  if (pathname === '/api/status') {
+    const mem = process.memoryUsage();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(
+      JSON.stringify({
+        uptimeSeconds: Math.floor((Date.now() - state.startTime) / 1000),
+        ramMb: Number((mem.rss / (1024 * 1024)).toFixed(1)),
+        packetsReceived: state.packetsReceived,
+        packetsForwarded: state.packetsForwarded,
+        forwardErrors: state.forwardErrors,
+        activeSockets: state.activeSockets,
+        activeSocketDevices: Array.from(state.socketMap.keys()),
+        devices: Array.from(state.devices.values()),
+        recentLogs: state.recentLogs
+      })
+    );
+  }
+
+  // 3. Real-time Devices & Positions (PULL API)
   if (pathname === '/api/positions' || pathname === '/api/devices') {
     const devList = Array.from(state.devices.values()).map((d) => ({
       ...d,
       lng: d.lon
     }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(devList));
-  }
-
-  // 3. Raw Packets JSON API (/api/rawlogs)
-  if (pathname === '/api/rawlogs') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(
-      JSON.stringify(
-        {
-          success: true,
-          count: state.rawPackets.length,
-          packets: state.rawPackets
-        },
-        null,
-        2
-      )
+      JSON.stringify({
+        success: true,
+        count: devList.length,
+        devices: devList
+      })
     );
   }
 
-  // 3.1 Raw Packets Log Download (/api/rawlogs/download or /raw_packets.log)
-  if (pathname === '/api/rawlogs/download' || pathname === '/raw_packets.log' || pathname === '/api/raw_packets.log') {
+  // 3.1 Raw Packets Log Download
+  if (pathname === '/raw_packets.log' || pathname === '/api/raw_packets.log') {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="raw_packets.log"');
     if (fs.existsSync(CONFIG.RAW_LOG_PATH)) {
       return fs.createReadStream(CONFIG.RAW_LOG_PATH).pipe(res);
     } else {
-      const fallback = state.rawPackets.map((p) => JSON.stringify(p)).join('\n');
-      return res.end(fallback || 'Ei tallennettuja lokitietoja.');
+      const fallbackLogs = state.recentLogs.map((l) => `[${l.time}] [${l.type.toUpperCase()}] ${l.msg}`).join('\n');
+      return res.end(fallbackLogs || 'Ei tallennettuja lokitietoja.');
     }
   }
 
-  // 4. GPS History & Tracks (/api/history, /api/history/:id, /api/tracks)
-  if (
-    pathname.startsWith('/api/history') ||
-    pathname.startsWith('/api/tracks') ||
-    (pathname.startsWith('/api/positions/') && pathname.length > 15)
-  ) {
+  // 4. GPS History & Tracks
+  if (pathname.startsWith('/api/history') || pathname.startsWith('/api/tracks') || (pathname.startsWith('/api/positions/') && pathname.length > 15)) {
     let deviceId = parsedUrl.searchParams.get('id') || '';
     if (!deviceId) {
       const parts = pathname.split('/').filter(Boolean);
@@ -1283,7 +915,7 @@ const httpServer = http.createServer((req, res) => {
     );
   }
 
-  // 5. Downlink Two-Way Commands (POST /api/devices/:id/command or POST /api/command)
+  // 5. Downlink Two-Way Commands (POST /api/devices/:id/command tai POST /api/command)
   if (req.method === 'POST' && (pathname === '/api/command' || pathname.includes('/command'))) {
     let body = '';
     req.on('data', (c) => (body += c));
@@ -1377,133 +1009,195 @@ const httpServer = http.createServer((req, res) => {
     );
   }
 
-  // 7. Interactive HTML Dashboard (GET / or GET /api/status)
+  // 7. Interactive HTML Dashboard (GET /)
+  const mem = process.memoryUsage();
+  const ramMb = (mem.rss / (1024 * 1024)).toFixed(1);
+  const uptimeMin = Math.floor((Date.now() - state.startTime) / 60000);
+  const activeSocketsList = Array.from(state.socketMap.keys());
+
   const devRows = Array.from(state.devices.values())
     .map((d) => {
-      const sock = state.socketMap.get(d.id);
-      const isOnline = Boolean(sock && !sock.destroyed && sock.writable);
-      const updatedStr = formatTimeFi(new Date(d.lastSeen || Date.now()));
+      const isOnline = Boolean(state.socketMap.has(d.id));
       return `<tr>
-        <td><b style="color:#79c0ff;">${d.id}</b> <span style="font-size:11px;color:#8b949e;">(${d.protocol})</span></td>
+        <td><b>${d.id}</b></td>
+        <td>${d.protocol}</td>
         <td>${d.lat}, ${d.lon}</td>
         <td>${d.speed} km/h</td>
         <td>${d.battery}%</td>
         <td>${
           d.isBarking
             ? `<span style="background:#f0883e;color:#000;font-weight:bold;padding:2px 8px;border-radius:10px;">🔔 HAUKKUU (${d.barkRate || 0}/min)</span>`
-            : '<span style="color:#7ee787;">Hiljaa</span>'
+            : '<span style="color:#8b949e">Hiljaa</span>'
         }</td>
-        <td>${isOnline ? '<span style="color:#3fb950">● Yhdistetty</span>' : '<span style="color:#8b949e">○ Ei yhteytta</span>'}</td>
-        <td>${updatedStr}</td>
+        <td>${isOnline ? '<span style="color:#3fb950">● Yhdistetty</span>' : '<span style="color:#8b949e">○ Ei socketia</span>'}</td>
+        <td>${new Date(d.lastSeen).toLocaleTimeString()}</td>
       </tr>`;
     })
     .join('');
 
-  const packetCards = state.rawPackets
-    .slice(0, 40)
-    .map((p) => {
-      const isLocOrAlarm = p.msgId === '0x0200' || p.protocol === 'SINOTRACK_ASCII' || (p.note && p.note.includes('HAUKKU'));
-      const bgStyle = isLocOrAlarm
-        ? 'background:#2e1a1a;border-left:3px solid #ff7b72;'
-        : 'border-left:3px solid #30363d;';
-      const extrasRow =
-        p.parsedExtras && p.parsedExtras.length > 0
-          ? `<div style="color:#d2a8ff;margin-bottom:4px;">Lisakentat (Extras): ${JSON.stringify(p.parsedExtras)}</div>`
-          : p.text
-          ? `<div style="color:#d2a8ff;margin-bottom:4px;">ASCII: ${p.text}</div>`
-          : '';
-      return `<div style="margin-bottom:8px;padding:8px 12px;border-radius:4px;font-family:monospace;font-size:12px;${bgStyle}">
-        <div style="display:flex;justify-content:space-between;color:#8b949e;margin-bottom:4px;">
-          <span><b>[${p.time}]</b> ${p.devId || ''} | Msg: <b style="color:#58a6ff;">${p.msgId || p.protocol}</b> | Alarm: <b style="color:#ff7b72;">${p.alarmFlag || '-'}</b> | Status: ${p.statusFlag || '-'}</span>
-          <span style="color:#7ee787;">${p.note || ''}</span>
-        </div>
-        ${extrasRow}
-        <div style="word-break:break-all;color:#c9d1d9;font-size:11px;opacity:0.85;">HEX: ${p.rawHex}</div>
-      </div>`;
-    })
+  const logRows = state.recentLogs
+    .slice(-15)
+    .reverse()
+    .map((l) => `<div style="font-family:monospace;font-size:13px;padding:3px 0;">[${l.time}] ${l.msg}</div>`)
     .join('');
 
-  const defaultDevId =
-    Array.from(state.socketMap.keys())[0] || Array.from(state.devices.keys())[0] || '89067647125';
-
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Micro GPS Gateway & Downlink</title><meta http-equiv="refresh" content="3"><style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 24px; margin: 0; }
-  h1 { color: #58a6ff; font-size: 22px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
-  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  th, td { padding: 10px 12px; border-bottom: 1px solid #21262d; text-align: left; }
-  th { color: #8b949e; font-size: 13px; text-transform: uppercase; }
-  .btn { background: #238636; color: #fff; text-decoration: none; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-weight: 600; display: inline-block; }
-  .btn-secondary { background: #21262d; color: #58a6ff; border: 1px solid #30363d; }
-  .live { display: inline-block; width: 10px; height: 10px; background: #3fb950; border-radius: 50%; margin-right: 8px; box-shadow: 0 0 8px #3fb950; }
-  code { background: #21262d; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 13px; }
-  input, select, button { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 12px; border-radius: 6px; font-size: 13px; }
-  button { background: #238636; color: #fff; cursor: pointer; border: none; font-weight: 600; }
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Micro GPS Gateway - Koirapannat & Downlink</title><style>
+  body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;margin:0;padding:20px;background:#0d1117;color:#c9d1d9;}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px;}
+  table{width:100%;border-collapse:collapse;}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #21262d;}
+  th{color:#8b949e;font-size:12px;text-transform:uppercase;letter-spacing:0.5px;}
+  .badge{background:#238636;color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;}
+  input,select,button{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:8px 12px;border-radius:6px;font-size:14px;}
+  button{background:#238636;color:#fff;cursor:pointer;border:none;font-weight:600;}
+  button:hover{background:#2ea043;}
+  a{color:#58a6ff;text-decoration:none;}a:hover{text-decoration:underline;}
+  .dev-pill{cursor:pointer;display:inline-block;padding:3px 8px;border-radius:6px;background:#21262d;color:#58a6ff;font-size:12px;margin-right:6px;margin-bottom:4px;border:1px solid #30363d;}
+  .dev-pill:hover{background:#30363d;}
   </style></head><body>
-  <h1>
-    <span><span class="live"></span> Micro GPS Gateway - Koirapannat & Downlink</span>
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:12px;">
     <div>
-      <a href="/api/rawlogs/download" class="btn">Lataa raakapakettiloki (.log)</a>
-      <a href="/api/rawlogs" target="_blank" class="btn btn-secondary" style="margin-left:8px;">JSON API</a>
+      <h2 style="margin:0 0 4px 0;">🐕 Erätutka Micro GPS Gateway & Downlink</h2>
+      <div style="font-size:13px;color:#8b949e;">
+        <a href="/raw_packets.log" download>📥 Lataa raakapakettiloki (.log)</a> &nbsp;|&nbsp; 
+        <a href="/api/devices" target="_blank">🌐 JSON API (/api/devices)</a> &nbsp;|&nbsp; 
+        <a href="/api/status" target="_blank">📊 Status JSON</a>
+      </div>
     </div>
-  </h1>
-  <div class="card">
-    <h3 style="margin:0 0 8px 0;font-size:15px;color:#58a6ff;">📤 Kaksisuuntainen Komentotuki (Downlink)</h3>
-    <p style="font-size:12px;color:#8b949e;margin:0 0 10px 0;">Laheta paivitysvali- tai asetuskomennot suoraan pannan TCP-yhteyteen:</p>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-      <input type="text" id="cmdDevId" placeholder="Pannan ID" value="${defaultDevId}" style="width:160px;" />
-      <select id="quickInterval" onchange="if(this.value) document.getElementById('cmdText').value='UPLOAD,'+this.value+'#'">
-        <option value="">-- Valitse vali --</option>
-        <option value="5">5s (UPLOAD,5#)</option>
-        <option value="10">10s (UPLOAD,10#)</option>
-        <option value="30">30s (UPLOAD,30#)</option>
-        <option value="60">60s (UPLOAD,60#)</option>
-      </select>
-      <input type="text" id="cmdText" value="UPLOAD,10#" style="width:140px;" />
-      <button onclick="sendCommand()">Laheta Pantaan</button>
-      <span id="cmdStatus" style="font-size:12px;margin-left:8px;"></span>
-    </div>
-    <script>
-      async function sendCommand(){
-        const id=document.getElementById("cmdDevId").value.trim();
-        const cmd=document.getElementById("cmdText").value.trim();
-        const s=document.getElementById("cmdStatus");
-        if(!id||!cmd){alert("Tayta ID ja komento!");return;}
-        s.innerText="Lahetetaan...";s.style.color="#e3b341";
-        try{
-          const r=await fetch("/api/devices/"+encodeURIComponent(id)+"/command",{
-            method:"POST",
-            headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({command:cmd})
-          });
-          const d=await r.json();
-          if(d.success){s.innerText="OK! ("+d.command+")";s.style.color="#3fb950";}
-          else{s.innerText="Virhe: "+(d.error||"Epäonnistui");s.style.color="#f85149";}
-        }catch(e){
-          s.innerText="Verkkovirhe: "+e.message;s.style.color="#f85149";
-        }
-      }
-    </script>
+    <span class="badge">Aktiivinen (GCE Linux)</span>
   </div>
+
+  <div class="card" id="metricsCard" style="display:flex;gap:24px;flex-wrap:wrap;">
+    <div>RAM: <b>${ramMb} MB</b></div>
+    <div>Uptime: <b>${uptimeMin} min</b></div>
+    <div>Paketteja saapunut: <b>${state.packetsReceived}</b></div>
+    <div>Välitetty Erätutkaan: <b style="color:#3fb950">${state.packetsForwarded}</b></div>
+    <div>Aktiivisia socketeja: <b style="color:#58a6ff">${state.activeSockets}</b> (<span id="activeSocketsList">${activeSocketsList.join(', ') || 'ei yhteyksiä'}</span>)</div>
+  </div>
+
+  <!-- Downlink Command Panel -->
   <div class="card">
-    <table style="margin-top:0;">
+    <h3 style="margin-top:0;">📤 Kaksisuuntainen Komentotuki (Downlink / Two-Way Command)</h3>
+    <p style="font-size:13px;color:#8b949e;">Lähetä komento suoraan avoimeen TCP-yhteyteen koirapannalle (SinoTrack ST-904L / ICAR IK122T / JT808):</p>
+    
+    <div id="devicePills" style="margin-bottom:10px;">
+      <span style="font-size:12px;color:#8b949e;margin-right:6px;">Valitse panta:</span>
+      ${
+        Array.from(state.devices.keys()).length > 0
+          ? Array.from(state.devices.keys())
+              .map((id) => `<button type="button" class="dev-pill" onclick="selectDevice('${id}')">${id} (${state.devices.get(id)?.protocol || 'GPS'})</button>`)
+              .join('')
+          : '<span style="font-size:12px;color:#8b949e">Ei pantoja vielä rekisteröity</span>'
+      }
+    </div>
+
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+      <input type="text" id="cmdDevId" placeholder="Laitteen ID / IMEI" value="${activeSocketsList[0] || Array.from(state.devices.keys())[0] || ''}" style="width:200px;" />
+      <select id="quickInterval" onchange="if(this.value) document.getElementById('cmdText').value='UPLOAD,'+this.value+'#'">
+        <option value="">-- Valitse päivitysväli --</option>
+        <option value="5">5 sekuntia (UPLOAD,5# tai SinoTrack 8050000 5)</option>
+        <option value="10">10 sekuntia (UPLOAD,10#)</option>
+        <option value="30">30 sekuntia (UPLOAD,30#)</option>
+        <option value="60">60 sekuntia (UPLOAD,60#)</option>
+      </select>
+      <input type="text" id="cmdText" placeholder="Komento (esim. UPLOAD,10#)" value="UPLOAD,10#" style="width:200px;" />
+      <button onclick="sendCommand()">Lähetä Pantaan</button>
+      <span id="cmdStatus" style="font-size:13px;font-weight:bold;"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <h3 style="margin:0;">Yhteydessä olevat koirapannat</h3>
+      <span style="font-size:12px;color:#8b949e;">Automaattipäivitys 3s välein</span>
+    </div>
+    <table>
       <thead>
-        <tr><th>Pannan ID</th><th>Sijainti (Lat, Lng)</th><th>Nopeus</th><th>Akku</th><th>Haukku</th><th>Socket</th><th>Paivitetty</th></tr>
+        <tr><th>ID</th><th>Protokolla</th><th>Koordinaatit</th><th>Nopeus</th><th>Akku</th><th>Haukku</th><th>Yhteystila</th><th>Viimeksi nähty</th></tr>
       </thead>
-      <tbody>
-        ${devRows || '<tr><td colspan="7" style="color:#8b949e">Ei pantoja viela yhdistettyna.</td></tr>'}
+      <tbody id="deviceTableBody">
+        ${devRows || '<tr><td colspan="8" style="color:#8b949e">Ei pantoja vielä yhdistettynä.</td></tr>'}
       </tbody>
     </table>
   </div>
+
   <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-      <h3 style="margin:0;font-size:16px;color:#58a6ff;">Viimeisimmat raakapaketit & Halytysanalyysi</h3>
-      <span style="font-size:12px;color:#8b949e;">Automaattipaivitys 3s valein | Tallennus: <code>${CONFIG.RAW_LOG_PATH}</code></span>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <h3 style="margin:0;">Viimeisimmät raakapaketit & Hälytysanalyysi</h3>
+      <span style="font-size:12px;color:#8b949e;">Tallennus: ${CONFIG.RAW_LOG_PATH}</span>
     </div>
-    <div style="max-height:480px;overflow-y:auto;background:#010409;padding:12px;border-radius:6px;border:1px solid #21262d;">
-      ${packetCards || '<div style="color:#8b949e;font-family:monospace;font-size:12px;">Odotetaan paketteja...</div>'}
+    <div id="logContainer">
+      ${logRows || '<div style="color:#8b949e">Odotetaan paketteja...</div>'}
     </div>
   </div>
+
+  <p style="font-size:12px;color:#8b949e">Kuuntelee: TCP 5013 (SinoTrack), TCP 5023 (ICAR/JT808/GT06), HTTP ${CONFIG.WEB_PORT} (Web & REST API)</p>
+
+  <script>
+    function selectDevice(id) {
+      document.getElementById('cmdDevId').value = id;
+    }
+
+    async function sendCommand() {
+      const id = document.getElementById('cmdDevId').value.trim();
+      const cmd = document.getElementById('cmdText').value.trim();
+      const status = document.getElementById('cmdStatus');
+      if (!id || !cmd) { alert('Täytä ID ja komento!'); return; }
+      status.innerText = 'Lähetetään...';
+      status.style.color = '#e3b341';
+      try {
+        const res = await fetch('/api/devices/' + encodeURIComponent(id) + '/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: cmd })
+        });
+        const data = await res.json();
+        if (data.success) {
+          status.innerText = '✅ Komento lähetetty! (' + data.command + ')';
+          status.style.color = '#3fb950';
+        } else {
+          status.innerText = '❌ Virhe: ' + (data.error || 'Epäonnistui');
+          status.style.color = '#f85149';
+        }
+      } catch(e) {
+        status.innerText = '❌ Verkkoyhteysvirhe: ' + e.message;
+        status.style.color = '#f85149';
+      }
+    }
+
+    // Auto-refresh devices and logs every 3 seconds
+    setInterval(async () => {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        if (data.devices) {
+          const tbody = document.getElementById('deviceTableBody');
+          if (data.devices.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8" style="color:#8b949e">Ei pantoja vielä yhdistettynä.</td></tr>';
+          } else {
+            tbody.innerHTML = data.devices.map(d => {
+              const isOnline = data.activeSocketDevices && data.activeSocketDevices.includes(d.id);
+              return '<tr>' +
+                '<td><b>' + d.id + '</b></td>' +
+                '<td>' + (d.protocol || '-') + '</td>' +
+                '<td>' + d.lat + ', ' + d.lon + '</td>' +
+                '<td>' + d.speed + ' km/h</td>' +
+                '<td>' + d.battery + '%</td>' +
+                '<td>' + (d.isBarking ? '<span style="background:#f0883e;color:#000;font-weight:bold;padding:2px 8px;border-radius:10px;">🔔 HAUKKUU (' + (d.barkRate || 0) + '/min)</span>' : '<span style="color:#8b949e">Hiljaa</span>') + '</td>' +
+                '<td>' + (isOnline ? '<span style="color:#3fb950">● Yhdistetty</span>' : '<span style="color:#8b949e">○ Ei socketia</span>') + '</td>' +
+                '<td>' + new Date(d.lastSeen).toLocaleTimeString() + '</td>' +
+                '</tr>';
+            }).join('');
+          }
+        }
+        if (data.recentLogs) {
+          const logDiv = document.getElementById('logContainer');
+          logDiv.innerHTML = data.recentLogs.slice(-15).reverse().map(l => 
+            '<div style="font-family:monospace;font-size:13px;padding:3px 0;">[' + l.time + '] [' + l.type.toUpperCase() + '] ' + l.msg + '</div>'
+          ).join('');
+        }
+      } catch(e) {}
+    }, 3000);
+  </script>
   </body></html>`;
 
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -1511,5 +1205,5 @@ const httpServer = http.createServer((req, res) => {
 });
 
 httpServer.listen(CONFIG.WEB_PORT, '0.0.0.0', () => {
-  log(`Web-hallinta & REST API kuuntelee portissa ${CONFIG.WEB_PORT}`);
+  log(`Hallintapaneeli ja REST API kuuntelee HTTP-portissa ${CONFIG.WEB_PORT}`);
 });

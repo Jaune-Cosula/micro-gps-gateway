@@ -32,7 +32,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleResetDefault = () => {
     setEratutkaUrl(
-      'https://ais-pre-ih3r3aegkvykcunl6ox36r-471959473114.europe-west2.run.app/api/gps/update'
+      'https://ais-pre-7fq53keha2opjy5hitirh4-471959473114.europe-west2.run.app/api/gps/update'
     );
     setForwardingEnabled(true);
     setLogRawPackets(true);

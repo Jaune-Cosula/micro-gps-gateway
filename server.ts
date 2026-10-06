@@ -17,6 +17,17 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // CORS middleware for external frontend / Erätutka calls
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+
   app.use(express.json());
 
   // ----------------------------------------------------
@@ -42,11 +53,54 @@ async function startServer() {
     });
   });
 
-  // 2. Devices & Trails
-  app.get('/api/devices', (req, res) => {
+  // 2. Real-time Devices & Positions (PULL API - Rule 4)
+  const handlePositionsRequest = (req: express.Request, res: express.Response) => {
+    const rawDevices = gatewayState.getDevices();
+    const devices = rawDevices.map((d) => ({
+      ...d,
+      lng: d.lon // ensure both lat, lon, and lng are available for any map client
+    }));
     res.json({
-      devices: gatewayState.getDevices()
+      success: true,
+      count: devices.length,
+      devices
     });
+  };
+
+  app.get('/api/devices', handlePositionsRequest);
+  app.get('/api/positions', handlePositionsRequest);
+
+  // 2.0 Erätutka HTTP POST Push Receiver (/api/gps/update)
+  app.post('/api/gps/update', async (req, res) => {
+    try {
+      const { id, lat, lon, lng, speed, battery, heading, timestamp, isBarking, barkRate, protocol } = req.body || {};
+      if (!id || (lat === undefined && lng === undefined && lon === undefined)) {
+        return res.status(400).json({ success: false, error: 'Pakolliset kentät puuttuvat: id, lat, lon/lng' });
+      }
+
+      const parsedLat = Number(lat);
+      const parsedLon = Number(lon !== undefined ? lon : lng);
+      const deviceId = String(id);
+
+      const pos = {
+        id: deviceId,
+        lat: parsedLat,
+        lon: parsedLon,
+        speed: Number(speed || 0),
+        battery: Number(battery !== undefined ? battery : 100),
+        heading: Number(heading || 0),
+        timestamp: Number(timestamp || Date.now()),
+        protocol: (protocol || (deviceId.length <= 10 ? 'SinoTrack' : 'ICAR_GT06')) as any,
+        isBarking: Boolean(isBarking),
+        barkRate: Number(barkRate || 0),
+        valid: true
+      };
+
+      const forwardRes = await gatewayState.handlePosition(pos, JSON.stringify(req.body));
+      res.json({ success: true, deviceId, recorded: true, forward: forwardRes });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
   });
 
   // 2.1 GPS History Endpoints
@@ -70,10 +124,66 @@ async function startServer() {
 
   app.get('/api/history', handleHistoryRequest);
   app.get('/api/history/:id', handleHistoryRequest);
-  app.get('/api/positions', handleHistoryRequest);
   app.get('/api/positions/:id', handleHistoryRequest);
   app.get('/api/tracks', handleHistoryRequest);
   app.get('/api/tracks/:id', handleHistoryRequest);
+
+  // 2.2 Device Downlink Commands (Two-Way Communication)
+  const handleCommandRequest = (req: express.Request, res: express.Response) => {
+    const deviceId = String(req.params.id || req.body?.deviceId || req.body?.id || req.query.id || '');
+    if (!deviceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Laitteen ID puuttuu (määritä deviceId parametrina tai JSON-rungossa)'
+      });
+    }
+
+    let { command, interval } = req.body || {};
+
+    if (interval !== undefined && interval !== null && !command) {
+      const sec = Math.max(1, parseInt(String(interval), 10) || 10);
+      command = `UPLOAD,${sec}#`;
+    }
+
+    if (!command || typeof command !== 'string' || !command.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Komento tai päivitysväli puuttuu (anna "command": "UPLOAD,10#" tai "interval": 10)'
+      });
+    }
+
+    const cleanCmd = command.trim();
+    const sendResult = gpsTcpServer.sendCommand(deviceId, cleanCmd);
+
+    if (sendResult.success) {
+      return res.json({
+        success: true,
+        message: 'Komento lähetetty laitteelle',
+        deviceId,
+        command: cleanCmd,
+        bytesSent: sendResult.bytesSent,
+        timestamp: Date.now()
+      });
+    } else {
+      return res.status(404).json({
+        success: false,
+        error: sendResult.error || 'Laite ei ole aktiivisessa TCP-yhteydessä',
+        deviceId,
+        activeDevices: gpsTcpServer.getActiveDeviceIds()
+      });
+    }
+  };
+
+  app.post('/api/devices/:id/command', handleCommandRequest);
+  app.post('/api/command', handleCommandRequest);
+  app.get('/api/devices/:id/connected', (req, res) => {
+    const deviceId = String(req.params.id || '');
+    res.json({
+      deviceId,
+      connected: gpsTcpServer.isDeviceConnected(deviceId),
+      activeDevices: gpsTcpServer.getActiveDeviceIds()
+    });
+  });
 
   // 3. Real-time Log Stream (SSE)
   app.get('/api/events', (req, res) => {
@@ -216,6 +326,25 @@ async function startServer() {
       }
     }
     res.status(400).json({ error: 'Could not parse collar packet' });
+  });
+
+  // 9. GCE Direct File Downloads (standalone-gateway.ts, server.js & install.sh)
+  app.get(['/standalone-gateway.ts', '/api/download/standalone-gateway.ts'], (req, res) => {
+    const filePath = path.join(process.cwd(), 'standalone-gateway.ts');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.sendFile(filePath);
+  });
+
+  app.get(['/server.js', '/api/download/server.js'], (req, res) => {
+    const filePath = path.join(process.cwd(), 'public', 'server.js');
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.sendFile(filePath);
+  });
+
+  app.get(['/install.sh', '/api/download/install.sh'], (req, res) => {
+    const filePath = path.join(process.cwd(), 'install.sh');
+    res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
+    res.sendFile(filePath);
   });
 
   // ----------------------------------------------------

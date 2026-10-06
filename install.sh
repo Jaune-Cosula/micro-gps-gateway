@@ -54,7 +54,7 @@ npm install --production --no-audit --no-fund tsx dotenv
 # Luodaan .env jos puuttuu
 if [ ! -f "$INSTALL_DIR/.env" ]; then
   cat << 'EOF' > "$INSTALL_DIR/.env"
-ERATUTKA_FORWARD_URL="https://ais-pre-ih3r3aegkvykcunl6ox36r-471959473114.europe-west2.run.app/api/gps/update"
+ERATUTKA_FORWARD_URL="https://ais-pre-7fq53keha2opjy5hitirh4-471959473114.europe-west2.run.app/api/gps/update"
 SINOTRACK_PORT="5013"
 ICAR_PORT="5023"
 WEB_PORT="8080"

@@ -9,7 +9,7 @@ import { GpsPosition, ForwardResult } from '../src/types';
 
 export const DEFAULT_ERATUTKA_URL =
   process.env.ERATUTKA_FORWARD_URL ||
-  'https://ais-pre-ih3r3aegkvykcunl6ox36r-471959473114.europe-west2.run.app/api/gps/update';
+  'https://ais-pre-7fq53keha2opjy5hitirh4-471959473114.europe-west2.run.app/api/gps/update';
 
 export async function forwardToEratutka(
   position: GpsPosition,

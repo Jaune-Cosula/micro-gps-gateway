@@ -190,7 +190,7 @@ export function parseIcarData(
     const isBark = /bark|barking|vib|vibration|shock|alm:01|alm:03/i.test(asciiStr);
     
     if (pos) {
-      pos.protocol = 'ICAR_H02';
+      pos.protocol = (asciiStr.startsWith('*HQ') || asciiStr.startsWith('HQ')) ? 'SinoTrack' : 'ICAR_H02';
       pos.isBarking = isBark;
       return {
         position: pos,
@@ -268,20 +268,37 @@ export function parseIcarData(
           if ((statusFlag & 0x04) !== 0 && lat > 0) lat = -lat; // South
           if ((statusFlag & 0x08) !== 0 && lon > 0) lon = -lon; // West
 
-          // Check if alarm flag has vibration / SOS / barking
-          const isBark = (alarmFlag & 0x01) !== 0 || (alarmFlag & 0x08) !== 0 || (alarmFlag & 0x10) !== 0;
-
-          // Battery from TLV if available
+          // Battery, satellites and the bark marker from the JT808 TLV extras.
           let battery = 90;
+          let satellites = 12;
+          // The IK122T Pro raises no alarmFlag bit for a bark: it adds a vendor TLV 0xE1 (28 bytes)
+          // to a position-less 0x0200 report. 0xE1 was present in every bark and no normal report
+          // across this collar's whole packet log, so it is the reliable bark signal.
+          let hasBarkTlv = false;
           let offset = 41;
-          while (offset + 2 < unescaped.length - 2) {
+          while (offset + 2 <= unescaped.length - 2) {
             const extraId = unescaped[offset];
             const extraLen = unescaped[offset + 1];
-            if (extraId === 0x25 && extraLen >= 2) {
+            if (offset + 2 + extraLen > unescaped.length - 2) break;
+            if (extraId === 0xe4 && extraLen >= 2) {
+              const batVal = unescaped.readUInt16BE(offset + 2);
+              if (batVal >= 0 && batVal <= 100) battery = batVal;
+            } else if (extraId === 0x31 && extraLen >= 1) {
+              satellites = unescaped[offset + 2];
+            } else if (extraId === 0x25 && extraLen >= 2) {
               battery = Math.min(100, Math.round(unescaped.readUInt16BE(offset + 2) / 10));
+            } else if (extraId === 0xe1 && extraLen >= 1) {
+              hasBarkTlv = true;
             }
             offset += 2 + extraLen;
           }
+
+          // Bark when the alarm flag has vibration/SOS bits (other models) or the IK122T bark TLV is present.
+          const isBark =
+            hasBarkTlv ||
+            (alarmFlag & 0x01) !== 0 ||
+            (alarmFlag & 0x08) !== 0 ||
+            (alarmFlag & 0x10) !== 0;
 
           const pos: GpsPosition = {
             id: devId,
@@ -292,7 +309,7 @@ export function parseIcarData(
             heading: Math.max(0, Math.min(360, heading)),
             timestamp: Date.now(),
             protocol: 'ICAR_JT808',
-            satellites: 12,
+            satellites,
             valid: (statusFlag & 0x02) !== 0,
             rawPacket: buffer.toString('hex')
           };
@@ -376,15 +393,17 @@ export function parseIcarData(
           const courseStatus = buffer.readUInt16BE(20);
           heading = courseStatus & 0x03ff; // bits 0-9
 
-          // Bit flags for hemisphere
-          const isWest = (courseStatus & 0x0800) !== 0;
-          const isSouth = (courseStatus & 0x0400) === 0;
-
-          if (isWest && lon > 0) lon = -lon;
-          if (isSouth && lat > 0) lat = -lat;
-
-          // GPS Real-time fix bit
+          // GPS Real-time fix bit (0x1000 = 1 means GPS valid fix)
           valid = (courseStatus & 0x1000) !== 0;
+
+          // Bit flags for hemisphere are only checked if courseStatus is non-zero and GPS fix is valid
+          if (courseStatus !== 0 && valid) {
+            const isWest = (courseStatus & 0x0800) !== 0;
+            const isSouth = (courseStatus & 0x0400) === 0;
+
+            if (isWest && lon > 0) lon = -lon;
+            if (isSouth && lat > 0) lat = -lat;
+          }
         }
 
         // Battery: GT06 sometimes includes voltage/battery status in subsequent bytes
@@ -533,4 +552,118 @@ export function parseIcarData(
 
   return { position: null, responseBuffer: null, packetType: 'unknown' };
 }
+
+/**
+ * Slices buffered TCP stream data into complete individual GT06, JT808, or ASCII frames.
+ * Returns an array of complete frame Buffers and any leftover unparsed bytes.
+ */
+export function extractIcarFrames(streamBuffer: Buffer): { frames: Buffer[]; remainder: Buffer } {
+  const frames: Buffer[] = [];
+  let offset = 0;
+
+  while (offset < streamBuffer.length) {
+    const remaining = streamBuffer.length - offset;
+    if (remaining < 2) {
+      break; // Need at least 2 bytes to determine packet header
+    }
+
+    const b0 = streamBuffer[offset];
+    const b1 = streamBuffer[offset + 1];
+
+    // 1. JT808 Protocol (delimited by 0x7E at both ends)
+    if (b0 === 0x7e) {
+      const endIdx = streamBuffer.indexOf(0x7e, offset + 1);
+      if (endIdx === -1) {
+        // Incomplete packet in stream, wait for more data
+        break;
+      }
+      const frame = streamBuffer.subarray(offset, endIdx + 1);
+      frames.push(frame);
+      offset = endIdx + 1;
+      continue;
+    }
+
+    // 2. Standard GT06 Protocol (0x78 0x78)
+    if (b0 === 0x78 && b1 === 0x78) {
+      if (remaining < 5) {
+        break; // Need at least header (2) + length (1) + stop (2)
+      }
+      const lengthByte = streamBuffer[offset + 2];
+      const packetLength = lengthByte + 5; // 2 start + 1 length + L content + 2 stop
+      if (remaining < packetLength) {
+        // Incomplete packet in stream, wait for more data
+        break;
+      }
+      const frame = streamBuffer.subarray(offset, offset + packetLength);
+      frames.push(frame);
+      offset += packetLength;
+      continue;
+    }
+
+    // 3. Extended GT06 Protocol (0x79 0x79)
+    if (b0 === 0x79 && b1 === 0x79) {
+      if (remaining < 6) {
+        break;
+      }
+      const lengthWord = streamBuffer.readUInt16BE(offset + 2);
+      const packetLength = lengthWord + 6; // 2 start + 2 length + L content + 2 stop
+      if (remaining < packetLength) {
+        break;
+      }
+      const frame = streamBuffer.subarray(offset, offset + packetLength);
+      frames.push(frame);
+      offset += packetLength;
+      continue;
+    }
+
+    // 4. ASCII Formats: starts with '*' (0x2a), '[' (0x5b), or '(' (0x28)
+    if (b0 === 0x2a || b0 === 0x5b || b0 === 0x28) {
+      let endIdx = -1;
+      for (let i = offset + 1; i < streamBuffer.length; i++) {
+        const c = streamBuffer[i];
+        if (c === 0x23 /* # */ || c === 0x0a /* \n */ || c === 0x5d /* ] */ || c === 0x29 /* ) */) {
+          endIdx = i;
+          break;
+        }
+      }
+      if (endIdx === -1) {
+        break; // Wait for end delimiter
+      }
+      const frame = streamBuffer.subarray(offset, endIdx + 1);
+      frames.push(frame);
+      offset = endIdx + 1;
+      continue;
+    }
+
+    // 5. Unrecognized byte / out of sync: advance offset until next recognized start marker
+    let foundNextStart = false;
+    for (let i = offset + 1; i < streamBuffer.length; i++) {
+      const b = streamBuffer[i];
+      if (
+        b === 0x7e ||
+        b === 0x2a ||
+        b === 0x5b ||
+        b === 0x28 ||
+        (b === 0x78 && streamBuffer[i + 1] === 0x78) ||
+        (b === 0x79 && streamBuffer[i + 1] === 0x79)
+      ) {
+        offset = i;
+        foundNextStart = true;
+        break;
+      }
+    }
+    if (!foundNextStart) {
+      if (streamBuffer[streamBuffer.length - 1] === 0x78 || streamBuffer[streamBuffer.length - 1] === 0x79) {
+        offset = streamBuffer.length - 1;
+      } else {
+        offset = streamBuffer.length;
+      }
+      break;
+    }
+  }
+
+  const remainder = streamBuffer.subarray(offset);
+  return { frames, remainder };
+}
+
 
