@@ -45,7 +45,8 @@ export async function forwardToEratutka(
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(jsonBody),
           'User-Agent': 'Micro-GPS-Gateway/1.0 (Node.js/TypeScript)',
-          'Accept': 'application/json'
+          'Accept': 'application/json',
+          ...(process.env.GATEWAY_SECRET ? { 'X-Gateway-Secret': process.env.GATEWAY_SECRET } : {})
         },
         timeout: 8000 // 8s timeout
       };

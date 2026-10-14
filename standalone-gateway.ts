@@ -14,6 +14,7 @@ import net from 'net';
 import http from 'http';
 import https from 'https';
 import fs from 'fs';
+import crypto from 'crypto';
 import { URL } from 'url';
 
 // --------------------------------------------------------------------------
@@ -27,7 +28,11 @@ const CONFIG = {
   ICAR_PORT: parseInt(process.env.ICAR_PORT || '5023', 10),
   WEB_PORT: parseInt(process.env.WEB_PORT || process.env.PORT || '8080', 10),
   FORWARDING_ENABLED: process.env.FORWARDING_ENABLED !== 'false',
-  RAW_LOG_PATH: process.env.RAW_LOG_PATH || '/opt/eratutka-gateway/raw_packets.log'
+  RAW_LOG_PATH: process.env.RAW_LOG_PATH || '/opt/eratutka-gateway/raw_packets.log',
+  // Shared secret for the HTTP API. Empty => gate disabled (transition / local dev).
+  GATEWAY_SECRET: process.env.GATEWAY_SECRET || '',
+  // Allowed browser origin for CORS. Empty => no cross-origin header (app proxies via Erätutka).
+  CORS_ORIGIN: process.env.GATEWAY_CORS_ORIGIN || ''
 };
 
 interface RawPacketEntry {
@@ -301,7 +306,8 @@ async function forwardGps(payload: {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(jsonStr)
+        'Content-Length': Buffer.byteLength(jsonStr),
+        ...(CONFIG.GATEWAY_SECRET ? { 'X-Gateway-Secret': CONFIG.GATEWAY_SECRET } : {})
       },
       timeout: 8000
     },
@@ -1185,10 +1191,10 @@ icarServer.listen(CONFIG.ICAR_PORT, '0.0.0.0', () => {
 // Lightweight HTTP Status, RawLog & Command Server (Port 8080)
 // --------------------------------------------------------------------------
 const httpServer = http.createServer((req, res) => {
-  // Mandatory CORS Headers for all responses (Rule 4)
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // CORS: no cross-origin header unless an origin is configured (the app proxies via Erätutka).
+  if (CONFIG.CORS_ORIGIN) res.setHeader('Access-Control-Allow-Origin', CONFIG.CORS_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, X-Gateway-Secret');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(200);
@@ -1202,6 +1208,21 @@ const httpServer = http.createServer((req, res) => {
   if (pathname === '/health' || pathname === '/api/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
+  }
+
+  // 1.1 Auth gate (default-deny). Env-gated: enforced only when GATEWAY_SECRET is set, so
+  // deploying this code changes nothing until the secret is set on the VM. Protects every
+  // route below (positions, rawlogs, history, downlink commands) and the dashboard fallthrough.
+  // The dashboard carries the secret via ?secret=... (its meta-refresh keeps the query string).
+  if (CONFIG.GATEWAY_SECRET) {
+    const provided = String(req.headers['x-gateway-secret'] || parsedUrl.searchParams.get('secret') || '');
+    const a = Buffer.from(provided);
+    const b = Buffer.from(CONFIG.GATEWAY_SECRET);
+    const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+    if (!ok) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'UNAUTHORIZED' }));
+    }
   }
 
   // 2. Real-time Devices & Positions (PULL API - returns direct array like live GCE server)
@@ -1474,9 +1495,10 @@ const httpServer = http.createServer((req, res) => {
         if(!id||!cmd){alert("Tayta ID ja komento!");return;}
         s.innerText="Lahetetaan...";s.style.color="#e3b341";
         try{
+          const sec=new URLSearchParams(location.search).get("secret")||"";
           const r=await fetch("/api/devices/"+encodeURIComponent(id)+"/command",{
             method:"POST",
-            headers:{"Content-Type":"application/json"},
+            headers:{"Content-Type":"application/json","X-Gateway-Secret":sec},
             body:JSON.stringify({command:cmd})
           });
           const d=await r.json();

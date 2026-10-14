@@ -59,6 +59,11 @@ SINOTRACK_PORT="5013"
 ICAR_PORT="5023"
 WEB_PORT="8080"
 FORWARDING_ENABLED="true"
+# Jaettu salaisuus HTTP-APIlle. TYHJÄ = portti pois päältä (siirtymävaihe). Aseta tähän
+# sama arvo kuin Erätutkan GATEWAY_SECRET, jolloin anonyymit kutsut hylätään (401).
+GATEWAY_SECRET=""
+# Sallittu selainorigin CORSille. Tyhjä = ei cross-origin-otsaketta.
+GATEWAY_CORS_ORIGIN=""
 EOF
   echo "Luotu oletusasetustiedosto: $INSTALL_DIR/.env"
 fi

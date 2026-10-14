@@ -4,6 +4,7 @@
  * and starts GPS TCP listeners (port 5013 for SinoTrack, port 5023 for ICAR).
  */
 import express from 'express';
+import crypto from 'crypto';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { gatewayState } from './server/state';
@@ -21,9 +22,19 @@ async function startServer() {
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, X-Gateway-Secret');
     if (req.method === 'OPTIONS') {
       return res.sendStatus(200);
+    }
+    // Auth gate (env-gated, default-deny). Enforced only when GATEWAY_SECRET is set.
+    const gwSecret = process.env.GATEWAY_SECRET || '';
+    if (gwSecret && req.path !== '/api/health') {
+      const provided = String(req.get('x-gateway-secret') || (req.query.secret as string) || '');
+      const a = Buffer.from(provided);
+      const b = Buffer.from(gwSecret);
+      if (!(a.length === b.length && crypto.timingSafeEqual(a, b))) {
+        return res.status(401).json({ success: false, error: 'UNAUTHORIZED' });
+      }
     }
     next();
   });
