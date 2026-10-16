@@ -268,13 +268,9 @@ export function parseIcarData(
           if ((statusFlag & 0x04) !== 0 && lat > 0) lat = -lat; // South
           if ((statusFlag & 0x08) !== 0 && lon > 0) lon = -lon; // West
 
-          // Battery, satellites and the bark marker from the JT808 TLV extras.
+          // Battery and satellites from the JT808 TLV extras.
           let battery = 90;
           let satellites = 12;
-          // The IK122T Pro raises no alarmFlag bit for a bark: it adds a vendor TLV 0xE1 (28 bytes)
-          // to a position-less 0x0200 report. 0xE1 was present in every bark and no normal report
-          // across this collar's whole packet log, so it is the reliable bark signal.
-          let hasBarkTlv = false;
           let offset = 41;
           while (offset + 2 <= unescaped.length - 2) {
             const extraId = unescaped[offset];
@@ -287,15 +283,14 @@ export function parseIcarData(
               satellites = unescaped[offset + 2];
             } else if (extraId === 0x25 && extraLen >= 2) {
               battery = Math.min(100, Math.round(unescaped.readUInt16BE(offset + 2) / 10));
-            } else if (extraId === 0xe1 && extraLen >= 1) {
-              hasBarkTlv = true;
             }
             offset += 2 + extraLen;
           }
 
-          // Bark when the alarm flag has vibration/SOS bits (other models) or the IK122T bark TLV is present.
+          // TLV 0xE1 is NOT a bark: on the IK122T Pro it fires ~8 s after every power-on (2026-10-15
+          // field test), so it must not be treated as one. Only the alarm bits used by other models
+          // remain; this collar sets none of them.
           const isBark =
-            hasBarkTlv ||
             (alarmFlag & 0x01) !== 0 ||
             (alarmFlag & 0x08) !== 0 ||
             (alarmFlag & 0x10) !== 0;

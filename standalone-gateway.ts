@@ -808,14 +808,12 @@ function handleIcar(buf: Buffer, socket: net.Socket, knownIdRef: { id?: string }
             posIdx += 2 + eLen;
           }
 
-          // IK122T Pro does not raise any alarmFlag bit for a bark: it sends a position-less
-          // 0x0200 report carrying a vendor TLV item 0xE1 (28 bytes). Over this collar's whole
-          // packet log 0xE1 was present in every bark and absent from every normal report, so it
-          // is the reliable signal - the alarm-bit test alone never fires for it. The alarm bits
-          // are kept for other collar models that do use them.
-          const hasBarkTlv = parsedExtras.some((x) => x.id === '0xE1');
+          // 0xE1 is NOT a bark: on the IK122T Pro it fires ~8 s after every power-on and only
+          // sporadically otherwise (2026-10-15 field test), so treating it as one flagged every
+          // collar start. The collar's real bark sensing is acoustic and off by default, reported
+          // (if at all) some other way not yet identified. Only the alarm bits used by other collar
+          // models remain; this collar sets none of them.
           const isBark =
-            hasBarkTlv ||
             (alarmFlag & 0x01) !== 0 ||
             (alarmFlag & 0x08) !== 0 ||
             (alarmFlag & 0x10) !== 0;
